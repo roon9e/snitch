@@ -57,8 +57,10 @@ def main() -> int:
 async def run(settings: Settings) -> int:
     """Build, poll, and shut down cleanly. Returns an exit code."""
     try:
-        app = await build_app(settings)
+        app = await _build_with_retry(settings)
     except PreflightError as exc:
+        # A permanent failure is the operator's to fix, so exit immediately and
+        # let the container stop rather than crash-looping on the same message.
         return _fail(str(exc))
     except TelegramAPIError as exc:
         return _fail(f"Telegram rejected the request: {exc}")
@@ -77,6 +79,35 @@ async def run(settings: Settings) -> int:
     finally:
         await app.shutdown()
     return 0
+
+
+#: Startup attempts, and the delay before each retry. Only transient failures
+#: (Telegram 5xx, rate limits, network errors) consume these.
+STARTUP_ATTEMPTS = 5
+STARTUP_BACKOFF_SECONDS = (5, 15, 30, 60)
+
+
+async def _build_with_retry(settings: Settings) -> App:
+    """Build the app, retrying only failures that could plausibly resolve."""
+    last: PreflightError | None = None
+    for attempt in range(1, STARTUP_ATTEMPTS + 1):
+        try:
+            return await build_app(settings)
+        except PreflightError as exc:
+            last = exc
+            if exc.permanent or attempt == STARTUP_ATTEMPTS:
+                raise
+            delay = STARTUP_BACKOFF_SECONDS[min(attempt, len(STARTUP_BACKOFF_SECONDS)) - 1]
+            logger.warning(
+                "startup attempt %d/%d failed (%s); retrying in %ds",
+                attempt,
+                STARTUP_ATTEMPTS,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    # Unreachable in practice: the loop returns, or raises on the last attempt.
+    raise last or PreflightError("startup failed")
 
 
 def _install_signal_handlers(app: App) -> None:

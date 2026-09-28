@@ -92,6 +92,26 @@ To find another user's numeric id, forward a message from them to
 [@userinfobot](https://t.me/userinfobot). Prefer numeric ids over usernames:
 a user can change their username at any time.
 
+#### "CHAT_ID is a basic group id, not a supergroup id"
+
+`CHAT_ID` must start with `-100`. Two things cause this message:
+
+- The group is still a **basic group**. snitch needs a supergroup, because
+  `restrictChatMember` (the mute) and forum topics (`WHITELIST_TOPIC_IDS`) do
+  not exist in a basic group. Enable **Topics** in the group settings to upgrade
+  it.
+- Your id is **stale**. Telegram assigns a brand new id when a group is
+  upgraded to a supergroup, so any id copied before the upgrade no longer
+  resolves. `/id` in the group gives you the current one.
+
+#### "cannot read CHAT_ID ... chat not found"
+
+Telegram returns this identical error for "no such chat" and "you are not a
+member", so check both, in this order:
+
+1. Is the bot actually a member of the group?
+2. Is `CHAT_ID` the current id (see above)?
+
 ### 5. Check the rule before you punish anyone
 
 ```
@@ -219,7 +239,19 @@ src/snitch/
 
 `preflight.py` refuses to start if the bot is missing the admin rights the
 configured punishment needs, or if no `RESTRICTED_USERS` entry resolves, rather
-than pretending to guard the group.
+than pretending to guard the group. It also tells permanent problems (a wrong
+`CHAT_ID`, a revoked admin right) apart from transient ones (a Telegram 5xx, a
+rate limit, a dropped connection):
+
+- **Permanent** -> the process exits with the message and the container stops
+  (`restart: on-failure:3`), so the one useful error is not buried under an
+  endless restart loop.
+- **Transient** -> retried in-process with backoff (5s, 15s, 30s, 60s) before
+  giving up, so a momentary Telegram outage does not kill a running bot.
+
+Checks run in dependency order - local config, then token, then chat, then
+restricted users, then rights - so the first line you see is the real problem
+rather than a screen of consequences.
 
 ## License
 

@@ -26,6 +26,11 @@ from snitch.directory import Directory, DirectoryEntry, DirectoryHolder
 
 CHAT_ID = -1001234567890
 OTHER_CHAT_ID = -1009999999999
+#: A real supergroup id shape. Telegram assigns these a fresh value whenever a
+#: basic group is upgraded, which is why a stale one is a common misconfiguration.
+SUPERGROUP_ID = -1003963946702
+#: A basic (non-supergroup) group id, which cannot support topics or restrictions.
+BASIC_GROUP_ID = -3963946702
 
 ALICE_ID = 111
 BOB_ID = 222

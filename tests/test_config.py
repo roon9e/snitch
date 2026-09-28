@@ -113,6 +113,45 @@ def test_whitelist_topic_accepts_a_negative_number():
 
 
 # ===========================================================================
+# chat id
+# ===========================================================================
+def test_numeric_chat_id_from_the_environment_becomes_an_int():
+    """Regression: an env-supplied id stayed a str, disabling the shape check.
+
+    pydantic's smart union keeps ``"-3963946702"`` as a str because ``str`` is a
+    valid member of ``int | str``, so ``settings.chat_id`` was never an int in
+    production and ``preflight`` took the "cannot check, skip" branch.
+    """
+    settings = Settings(_env_file=None, bot_token="1:x", chat_id="-1001234567890")  # type: ignore[call-arg]
+
+    assert settings.chat_id == -1001234567890
+    assert isinstance(settings.chat_id, int)
+
+
+def test_basic_group_id_from_the_environment_becomes_an_int():
+    settings = Settings(_env_file=None, bot_token="1:x", chat_id="-3963946702")  # type: ignore[call-arg]
+
+    assert settings.chat_id == -3963946702
+    assert isinstance(settings.chat_id, int)
+
+
+def test_username_chat_id_stays_a_string():
+    settings = Settings(_env_file=None, bot_token="1:x", chat_id="@mygroup")  # type: ignore[call-arg]
+
+    assert settings.chat_id == "@mygroup"
+
+
+def test_malformed_chat_id_is_rejected():
+    with pytest.raises(ValidationError, match="neither a numeric group id"):
+        Settings(_env_file=None, bot_token="1:x", chat_id="my group")  # type: ignore[call-arg]
+
+
+def test_empty_chat_id_is_rejected():
+    with pytest.raises(ValidationError, match="must not be empty"):
+        Settings(_env_file=None, bot_token="1:x", chat_id="   ")  # type: ignore[call-arg]
+
+
+# ===========================================================================
 # mute bounds
 # ===========================================================================
 def test_mute_hours_defaults_to_24():

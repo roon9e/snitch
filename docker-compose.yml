@@ -13,7 +13,14 @@ services:
       dockerfile: Dockerfile
     image: snitch:1.0.0
     container_name: snitch
-    restart: unless-stopped
+
+    # `on-failure:3` rather than `unless-stopped`: a wrong CHAT_ID or a missing
+    # admin right is permanent, and restarting forever just buries the one
+    # useful error message under a wall of identical stack traces. Transient
+    # startup failures are retried inside the process (see __main__.STARTUP_ATTEMPTS),
+    # so three container restarts is already generous. Raise this to `unless-stopped`
+    # once the bot is running cleanly.
+    restart: on-failure:3
 
     # Secrets stay in .env on the host and are injected at run time. They are
     # never baked into the image and never appear in `docker inspect` output as

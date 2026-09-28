@@ -74,14 +74,22 @@ def create_bot(settings: Settings) -> Bot:
 
 
 async def build_app(settings: Settings) -> App:
-    """Create every component, verify the environment, and return the app."""
+    """Create every component, verify the environment, and return the app.
+
+    Checks run in dependency order so the first thing an operator sees is the
+    real problem: token, then chat, then the restricted users. Resolving users
+    before checking the chat produces a screen of "could not be resolved"
+    warnings that are all just consequences of the bot not being in the group.
+    """
     bot = create_bot(settings)
     try:
-        # Validate the token before anything else, so a bad token produces one
-        # clear line instead of a screen of failed user lookups.
+        preflight.check_local(settings)
         me = await preflight.check_token(bot)
+        chat = await preflight.check_chat(bot, settings)
         directory = DirectoryHolder(await resolve(bot, settings))
-        await preflight.run(bot, settings, directory.current, me=me)
+        await preflight.check_rights(bot, settings, me.id)
+        preflight.check_config(settings, directory.current)
+        preflight.check_topic_hint(chat, settings)
     except BaseException:
         # Never leak the aiohttp session on a failed startup.
         await bot.session.close()

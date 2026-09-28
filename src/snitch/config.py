@@ -187,6 +187,30 @@ class Settings(BaseSettings):
             raise ValueError("BOT_TOKEN must not be empty")
         return value
 
+    @field_validator("chat_id")
+    @classmethod
+    def _normalize_chat_id(cls, value: int | str) -> int | str:
+        """Coerce a numeric CHAT_ID to ``int``, leaving ``@username`` alone.
+
+        Without this, pydantic's smart union keeps an environment-supplied
+        ``CHAT_ID=-100123`` as a *string* because ``str`` is a valid member of
+        ``int | str``. Anything that inspects the id - the supergroup shape check
+        in particular - would then silently take the wrong branch.
+        """
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("CHAT_ID must not be empty")
+        if stripped.startswith("@"):
+            return stripped
+        try:
+            return int(stripped)
+        except ValueError as exc:
+            raise ValueError(
+                f"CHAT_ID {value!r} is neither a numeric group id nor an @username"
+            ) from exc
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
