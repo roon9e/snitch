@@ -53,19 +53,26 @@ def make_app(refresher: asyncio.Task[None] | None = None) -> App:
 
 
 @pytest.fixture
-def captured_loop_handler(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any, tuple]]:
-    """Capture what gets registered with the event loop's signal handler."""
-    captured: list[tuple[Any, Any, tuple]] = []
+async def captured_loop_handler(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any, tuple]]:
+    """Capture what gets registered with the event loop's signal handler.
 
-    def fake_add_signal_handler(self: Any, sig: Any, callback: Any, *args: Any) -> None:  # noqa: ARG001
+    The handler is patched onto the running loop *instance*, not onto
+    ``AbstractEventLoop``: on Linux the concrete ``_UnixSelectorEventLoop``
+    overrides ``add_signal_handler`` and would shadow a class level patch, which
+    is why this suite passes on Windows and failed on CI.
+    """
+    captured: list[tuple[Any, Any, tuple]] = []
+    loop = asyncio.get_running_loop()
+
+    def fake_add_signal_handler(sig: Any, callback: Any, *args: Any) -> None:
         captured.append((sig, callback, args))
 
-    monkeypatch.setattr(asyncio.AbstractEventLoop, "add_signal_handler", fake_add_signal_handler)
+    monkeypatch.setattr(loop, "add_signal_handler", fake_add_signal_handler, raising=False)
     return captured
 
 
 @pytest.fixture
-def captured_signal_handler(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
+async def captured_signal_handler(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, Any]]:
     """Capture the Windows fallback path (``signal.signal``)."""
     captured: list[tuple[Any, Any]] = []
 
@@ -77,13 +84,14 @@ def captured_signal_handler(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, 
 
 
 @pytest.fixture
-def no_loop_signal_support(monkeypatch: pytest.MonkeyPatch) -> None:
+async def no_loop_signal_support(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the loop reject signal handlers, as Windows does."""
 
-    def raise_not_implemented(self: Any, sig: Any, callback: Any, *args: Any) -> None:
+    def raise_not_implemented(sig: Any, callback: Any, *args: Any) -> None:
         raise NotImplementedError
 
-    monkeypatch.setattr(asyncio.AbstractEventLoop, "add_signal_handler", raise_not_implemented)
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "add_signal_handler", raise_not_implemented, raising=False)
 
 
 # ===========================================================================
