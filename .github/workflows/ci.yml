@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The full matrix: the project claims >=3.10 support and ships on 3.12.
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy
+
+      - name: Pytest
+        run: uv run pytest --cov=snitch --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # --locked proves the committed uv.lock still matches pyproject.toml.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: snitch:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image runs and imports
+        run: |
+          docker run --rm --entrypoint sh snitch:ci -c \
+            'python -c "import snitch, aiogram; print(snitch.__version__, aiogram.__version__)"'
+
+      - name: Image is not running as root
+        run: |
+          uid=$(docker run --rm --entrypoint id snitch:ci -u)
+          test "$uid" != "0" || (echo "image runs as root" && exit 1)
+          echo "runs as uid $uid"
+
+      - name: Image contains no secrets
+        run: |
+          # A .env in the image would mean a token had been baked in.
+          if docker run --rm --entrypoint sh snitch:ci -c 'test -e /app/.env'; then
+            echo ".env found inside the image" && exit 1
+          fi
+          echo "no .env in the image"

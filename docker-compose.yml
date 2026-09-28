@@ -1,0 +1,45 @@
+# snitch - Telegram moderator bot
+#
+#   cp .env.example .env      # then fill in BOT_TOKEN, CHAT_ID, RESTRICTED_USERS
+#   docker compose up -d
+#   docker compose logs -f
+#
+# The bot is long polling, so nothing is published to the host.
+
+services:
+  snitch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: snitch:1.0.0
+    container_name: snitch
+    restart: unless-stopped
+
+    # Secrets stay in .env on the host and are injected at run time. They are
+    # never baked into the image and never appear in `docker inspect` output as
+    # build arguments.
+    env_file:
+      - .env
+
+    environment:
+      # Keep the container's own copy authoritative even if the host env leaks
+      # a stray DATA_DIR.
+      DATA_DIR: /app/data
+      TZ: ${TZ:-UTC}
+
+    volumes:
+      # The append-only violations.jsonl audit log survives restarts.
+      - ./data:/app/data
+
+    # PID 1 reaps zombies and forwards SIGTERM, so the bot can shut down
+    # gracefully instead of being killed mid-request.
+    init: true
+
+    # Long enough for polling to unwind and the aiohttp session to close.
+    stop_grace_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

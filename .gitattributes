@@ -1,0 +1,20 @@
+# Normalise to LF in the repository.
+#
+# The Docker image is built on Linux, where a CRLF in a shell script or a
+# Dockerfile produces "not found" / "bad interpreter" errors that never reproduce
+# on a Windows checkout. Checking out CRLF locally is fine and keeps git diffs
+# quiet on Windows.
+* text=auto eol=lf
+
+# Windows-native scripts must keep CRLF to run at all.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets, never touched.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

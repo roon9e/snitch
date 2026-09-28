@@ -1,0 +1,24 @@
+# Keep the build context small and make sure secrets never reach the daemon.
+.git
+.github
+.gitignore
+
+# Secrets: the image must never contain a token.
+.env
+.env.*
+!.env.example
+
+# Local environments and tooling caches.
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Not needed to run the bot.
+data
+tests
+docker-compose.yml
