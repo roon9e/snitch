@@ -232,24 +232,31 @@ snitch says so explicitly instead of reporting that your bot token is invalid.
 
 ## Using a prebuilt image
 
-`docker compose up` builds from your checkout. The compose file pins
-`pull_policy: build` and an overridable `IMAGE`, so pointing it at a registry
-image is a one-liner:
+Multi-arch images (`linux/amd64`, `linux/arm64`) are published to ghcr.io on
+every `v*` tag:
 
 ```bash
 IMAGE=ghcr.io/roon9e/snitch:1.0.0 docker compose up -d
 ```
 
-> **No published image yet.** The `gh` token this repo was created with has no
-> `write:packages` scope, so nothing has been pushed to `ghcr.io`. To publish:
-> grant the repository `read:packages` + `write:packages` under
-> *Settings -> Actions -> General -> Workflow permissions*, then
-> `gh auth refresh -h github.com -s write:packages`, then push a `v*` tag.
+Available tags: `1.0.0` (and `1.0` for the minor series), plus `latest`.
 
-`pull_policy: build` is also what stops a confusing failure: without it,
-compose resolves the unqualified `snitch:1.0.0` as `docker.io/library/snitch`,
-tries Docker Hub, prints `pull access denied for snitch`, and only then falls
-back to building locally.
+To publish a new one, from a clean checkout:
+
+```bash
+git tag v1.1.0 && git push origin v1.1.0
+```
+
+`release.yml` builds, pushes, then pulls the image back and runs it, so a broken
+build fails the release rather than shipping. It needs the repository set to
+*Settings -> Actions -> General -> Workflow permissions -> Read and write
+permissions*; the workflow itself only uses the automatic `GITHUB_TOKEN`.
+
+`docker compose up` with no `IMAGE` set builds from your checkout instead, which
+is the better default while you are changing anything. `pull_policy: build` is
+what stops compose resolving the unqualified `snitch:1.0.0` as
+`docker.io/library/snitch` and printing `pull access denied` before quietly
+building anyway.
 
 ## The mute caveat, in full
 
