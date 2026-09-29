@@ -231,6 +231,18 @@ class Settings(BaseSettings):
     #: value means faster recovery rather than fewer retries.
     request_timeout: float = Field(default=30.0, ge=5.0, le=300.0)
 
+    #: How many messages to delete per API call. Telegram's ceiling for
+    #: deleteMessages is 100 and that is the default: deleting one at a time is
+    #: what earns a 429 in the first place. A burst of 1000 violations costs 10
+    #: calls instead of 1000.
+    delete_batch_size: int = Field(default=100, ge=1, le=100)
+
+    #: How long a queued deletion may wait before the batch is sent, in seconds.
+    #: A lone violation is deleted inline and is not affected by this; it only
+    #: sets the deadline for messages that are part of a burst. Lower it to
+    #: delete sooner at the cost of smaller batches, raise it for larger ones.
+    delete_flush_seconds: float = Field(default=0.5, ge=0.0, le=30.0)
+
     #: Word blacklist file. One word or `re:<pattern>` per line; `#` comments.
     #: Left empty, it defaults to DATA_DIR/wordlist.txt. There is no on/off
     #: switch on purpose: the rule is active exactly when the file exists, so
@@ -473,6 +485,8 @@ class Settings(BaseSettings):
             "log_level": self.log_level,
             "log_format": self.log_format.value,
             "request_timeout": self.request_timeout,
+            "delete_batch_size": self.delete_batch_size,
+            "delete_flush_seconds": self.delete_flush_seconds,
             "process_backlog": self.process_backlog,
             "privacy_mode_verified": self.privacy_mode_verified,
             "blacklist_file": str(self.wordlist_path),

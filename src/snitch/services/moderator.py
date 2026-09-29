@@ -35,6 +35,7 @@ from snitch.permissions import (
     USE_INDEPENDENT_PERMISSIONS,
 )
 from snitch.services.audit import AuditLog
+from snitch.services.delete_queue import DeleteQueue
 from snitch.services.notifier import Notifier, describe_user
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,13 @@ class Moderator:
         self._notifier = notifier
         self._locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_mute_attempt: dict[int, float] = {}
+        # Batched deletion. Kept per Moderator so there is one code path for
+        # every deletion, in production and under test alike.
+        self._deletes = DeleteQueue(
+            bot,
+            batch_size=settings.delete_batch_size,
+            flush_seconds=settings.delete_flush_seconds,
+        )
 
     # ------------------------------------------------------------------
     async def handle(self, message: Message, detection: Detection) -> ViolationResult:
@@ -99,6 +107,7 @@ class Moderator:
         sender = message.from_user
         assert sender is not None, "handle() called for a message without a sender"
 
+        await self._deletes.start()
         async with self._locks[sender.id]:
             deleted, delete_error = await self._delete(message)
             mute, mute_until, mute_error = await self._mute(message, sender.id)
@@ -119,23 +128,43 @@ class Moderator:
         return result
 
     # ------------------------------------------------------------------
+    async def flush_deletes(self) -> None:
+        """Send every queued deletion now. Used by tests and by shutdown."""
+        await self._deletes.flush()
+
+    async def close_deletes(self) -> None:
+        """Stop the delete worker after a final flush.
+
+        Must run on shutdown: a queued deletion that is never flushed is a
+        message left sitting in the group, which is the failure this queue
+        creates and therefore also the one it has to clean up.
+        """
+        await self._deletes.close()
+
+    # ------------------------------------------------------------------
     async def _delete(self, message: Message) -> tuple[bool, str | None]:
-        """Remove the offending message."""
+        """Remove the offending message.
+
+        A lone violation is deleted inline, so its outcome is known exactly and
+        reported exactly. Under a burst the message is queued and ``True`` here
+        means "Telegram has been asked" - the flush logs what really happened,
+        per message, when the answer arrives.
+        """
         if not self._settings.delete_message:
             return False, None
 
         try:
-            await self._bot.delete_message(
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-            )
+            outcome = await self._deletes.enqueue(message.chat.id, message.message_id)
         except TelegramAPIError as exc:
-            detail = _describe_api_error(exc)
-            if "not found" in detail.lower() or "message_id_invalid" in detail.lower():
-                logger.debug("message %s was already gone", message.message_id)
-                return True, None
-            logger.warning("could not delete message %s: %s", message.message_id, detail)
-            return False, detail
+            failure = _describe_api_error(exc)
+            logger.warning("could not delete message %s: %s", message.message_id, failure)
+            return False, failure
+
+        if outcome is None:
+            return True, None  # queued; the flush will report the result
+        error = outcome.get(message.message_id)
+        if error is not None:
+            return False, error
         return True, None
 
     async def _mute(

@@ -90,7 +90,7 @@ class CommandBot:
             status="member", user=make_user(user_id, f"user{user_id}")
         )
 
-    async def delete_message(self, **kwargs: Any) -> bool:
+    async def delete_messages(self, **kwargs: Any) -> bool:
         self.deleted.append(kwargs)
         return True
 

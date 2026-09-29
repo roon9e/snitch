@@ -240,6 +240,8 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 | `RESTRICTED_USERS` | *required* | Comma separated user ids and/or `@usernames` |
 | `WHITELIST_TOPIC_IDS` | empty | Topic ids where the rule is off; `general` for the General topic |
 | `DELETE_MESSAGE` | `true` | Delete the offending message |
+| `DELETE_BATCH_SIZE` | `100` | Message ids per `deleteMessages` call (Telegram's ceiling) |
+| `DELETE_FLUSH_SECONDS` | `0.5` | Coalescing window for batching a burst |
 | `BLACKLIST_FILE` | `""` | Word list; empty means `DATA_DIR/wordlist.txt`. Active when the file exists |
 | `MUTE_ENABLED` | `false` | Also mute the sender |
 | `MUTE_HOURS` | `24` | Mute length, `1..8784` |
@@ -258,6 +260,46 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 Invalid configuration is rejected at startup, with the offending variable named.
 `MUTE_HOURS` above 8784 is refused because Telegram silently turns any
 restriction longer than 366 days into a **permanent** ban.
+
+---
+
+## Flood waits and batching
+
+Telegram answers `429 Too Many Requests` with a `retry_after`, and deleting one
+message per API call is the surest way to earn one during a burst. snitch uses
+`deleteMessages`, which takes **up to 100 message ids per call**:
+
+| What happens | API calls |
+|---|---|
+| A single violation | 1, immediately |
+| A burst of 1000 violations | ~11 |
+
+**A lone violation is not delayed.** The first message of a burst is deleted
+inline, before anything is queued, so the common case has no added latency at
+all. Everything arriving within `DELETE_FLUSH_SECONDS` of it is batched, which
+is why batching actually happens — a queue that only batched when it was already
+non-empty would send every message on its own, because each would find an empty
+queue.
+
+**A flood wait is obeyed, not fought.** The `retry_after` the server asks for is
+waited exactly, then the same batch is retried. Retrying sooner turns a flood
+wait into an outage; waiting forever turns a bad proxy into one. It is capped
+(60s) and given up on after 3 attempts, so shutdown cannot be parked.
+
+**One undeletable message does not cost the other 99.** Messages older than 48
+hours cannot be deleted, and Telegram rejects the whole call when a batch
+contains one. A `400` — the Bot API's signal for a per-message rejection — is
+split in half and retried, so isolating one bad id costs ~7 calls instead of
+retrying 100 individually.
+
+Failures that are *not* per-message are **not** split: a missing right, or a
+`403`, applies to the whole call, and halving it cannot help. Neither is a
+`False` return with no explanation — there is nothing to guide the split, so
+blindly retrying 100 times is exactly the flood wait this exists to avoid.
+
+Deletions are partitioned by chat, and anything queued is flushed on shutdown. A
+queued deletion dropped at exit is a message left sitting in the group, which is
+the one failure this queue creates and therefore the one it has to clean up.
 
 ---
 

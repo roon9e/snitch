@@ -46,12 +46,17 @@ class App:
     settings: Settings
     directory: DirectoryHolder
     liveness: LivenessMonitor
+    moderator: Moderator
     started_at: datetime
     refresher: asyncio.Task[None] | None = None
     watcher_task: asyncio.Task[None] | None = None
 
     async def shutdown(self) -> None:
         """Cancel background work and close the HTTP session."""
+        # Flush queued deletions first: they are the only work whose loss is
+        # visible to the group as "snitch ignored that message".
+        with contextlib.suppress(Exception):
+            await self.moderator.close_deletes()
         for task in (self.refresher, self.watcher_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -304,6 +309,7 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
         settings=settings,
         directory=directory,
         liveness=liveness,
+        moderator=moderator,
         started_at=started_at,
     )
     app.refresher = asyncio.create_task(

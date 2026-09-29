@@ -58,7 +58,12 @@ class FakeBot:
         self.restrict_error = restrict_error
         self.member_error = member_error
 
-    async def delete_message(self, **kwargs: Any) -> bool:
+    async def delete_messages(self, **kwargs: Any) -> bool:
+        """Records one entry per call, so batch size is visible in tests.
+
+        This is the only deletion path the bot has now - a single message goes
+        through deleteMessages with a one-element list.
+        """
         self.calls.append(("delete", kwargs))
         if self.delete_error:
             raise self.delete_error
@@ -137,7 +142,9 @@ async def test_violation_deletes_the_message(tmp_path):
     result = await moderator.handle(violation_message(), _detect(violation_message()))
 
     assert result.deleted is True
-    assert ("delete", {"chat_id": CHAT_ID, "message_id": 1}) in bot.calls
+    # A lone violation goes through deleteMessages with a one-element list:
+    # batching changes how the request is shaped, not that it is made.
+    assert ("delete", {"chat_id": CHAT_ID, "message_ids": [1]}) in bot.calls
 
 
 async def test_delete_happens_before_mute(tmp_path):
@@ -297,7 +304,18 @@ async def test_cooldown_prevents_api_storms(tmp_path):
 
     restricts = [name for name in bot.names() if name == "restrict"]
     assert len(restricts) == 1, "the cooldown must collapse the burst into one mute"
-    assert bot.names().count("delete") == 5, "every message is still deleted"
+
+    await moderator.flush_deletes()
+
+    # Every message is still deleted - but the burst cost two calls, not five.
+    deleted_ids = sorted(
+        message_id
+        for _, kwargs in bot.calls
+        if kwargs.get("message_ids")
+        for message_id in kwargs["message_ids"]
+    )
+    assert deleted_ids == [1, 2, 3, 4, 5]
+    assert bot.names().count("delete") == 2, "batched, not one call per message"
 
 
 async def test_mute_failure_is_reported_not_raised(tmp_path):

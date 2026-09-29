@@ -43,21 +43,33 @@ class StubBot:
         self.session = StubSession()
 
 
+class StubModerator:
+    """Records whether queued deletions were flushed on the way out."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close_deletes(self) -> None:
+        self.closed = True
+
+
 def make_app(
     refresher: asyncio.Task[None] | None = None,
     watcher_task: asyncio.Task[None] | None = None,
-) -> App:
-    """A real App wired to stub collaborators."""
+) -> tuple[App, StubModerator]:
+    """A real App wired to stub collaborators, plus the moderator stub."""
+    moderator = StubModerator()
     return App(
         bot=StubBot(),  # type: ignore[arg-type]
         dispatcher=StubDispatcher(),  # type: ignore[arg-type]
         settings=Settings(_env_file=None, bot_token="1:x", chat_id=-100),  # type: ignore[call-arg]
         directory=None,  # type: ignore[arg-type]
         liveness=LivenessMonitor(),
+        moderator=moderator,  # type: ignore[arg-type]
         started_at=datetime.now(tz=timezone.utc),
         refresher=refresher,
         watcher_task=watcher_task,
-    )
+    ), moderator
 
 
 @pytest.fixture
@@ -106,7 +118,7 @@ async def no_loop_signal_support(monkeypatch: pytest.MonkeyPatch) -> None:
 # the event loop path
 # ===========================================================================
 async def test_signal_handlers_are_registered(captured_loop_handler):
-    entrypoint._install_signal_handlers(make_app())
+    entrypoint._install_signal_handlers(make_app()[0])
 
     registered = {sig for sig, _, _ in captured_loop_handler}
     assert signal.SIGINT in registered
@@ -115,7 +127,7 @@ async def test_signal_handlers_are_registered(captured_loop_handler):
 
 async def test_signal_callback_schedules_the_shutdown_coroutine(captured_loop_handler):
     """The regression: stop_polling() returns a coroutine that must be awaited."""
-    app = make_app()
+    app = make_app()[0]
     entrypoint._install_signal_handlers(app)
 
     _, callback, args = next(e for e in captured_loop_handler if e[0] is signal.SIGTERM)
@@ -126,7 +138,7 @@ async def test_signal_callback_schedules_the_shutdown_coroutine(captured_loop_ha
 
 
 async def test_each_signal_stops_polling_once(captured_loop_handler):
-    app = make_app()
+    app = make_app()[0]
     entrypoint._install_signal_handlers(app)
 
     for _sig, callback, args in captured_loop_handler:
@@ -141,7 +153,7 @@ async def test_each_signal_stops_polling_once(captured_loop_handler):
 # ===========================================================================
 @pytest.mark.usefixtures("no_loop_signal_support")
 async def test_falls_back_to_signal_module_when_unsupported(captured_signal_handler):
-    entrypoint._install_signal_handlers(make_app())
+    entrypoint._install_signal_handlers(make_app()[0])
 
     registered = {sig for sig, _ in captured_signal_handler}
     assert signal.SIGINT in registered
@@ -150,7 +162,7 @@ async def test_falls_back_to_signal_module_when_unsupported(captured_signal_hand
 
 @pytest.mark.usefixtures("no_loop_signal_support")
 async def test_fallback_handler_also_schedules_shutdown(captured_signal_handler):
-    app = make_app()
+    app = make_app()[0]
     entrypoint._install_signal_handlers(app)
 
     _, handler = next(e for e in captured_signal_handler if e[0] is signal.SIGTERM)
@@ -169,7 +181,7 @@ async def test_shutdown_cancels_the_refresher():
 
     task = asyncio.create_task(forever())
     await asyncio.sleep(0)
-    app = make_app(refresher=task)
+    app = make_app(refresher=task)[0]
 
     await app.shutdown()
 
@@ -177,7 +189,7 @@ async def test_shutdown_cancels_the_refresher():
 
 
 async def test_shutdown_is_safe_without_a_refresher():
-    await make_app(refresher=None).shutdown()
+    await make_app(refresher=None)[0].shutdown()
 
 
 async def test_shutdown_tolerates_an_already_finished_refresher():
@@ -187,12 +199,12 @@ async def test_shutdown_tolerates_an_already_finished_refresher():
     task = asyncio.create_task(quick())
     await task
 
-    await make_app(refresher=task).shutdown()
+    await make_app(refresher=task)[0].shutdown()
 
 
 async def test_shutdown_cancels_the_liveness_task():
     """The liveness loop must not outlive the process."""
-    app = make_app()
+    app = make_app()[0]
     app.watcher_task = asyncio.create_task(app.liveness.run())
     await asyncio.sleep(0)
 
@@ -209,10 +221,54 @@ async def test_shutdown_cancels_both_background_tasks():
     liveness_task = asyncio.create_task(forever())
     await asyncio.sleep(0)
 
-    await make_app(refresher=refresher, watcher_task=liveness_task).shutdown()
+    await make_app(refresher=refresher, watcher_task=liveness_task)[0].shutdown()
 
     assert refresher.cancelled() or refresher.done()
     assert liveness_task.cancelled() or liveness_task.done()
+
+
+async def test_shutdown_flushes_queued_deletions():
+    """The regression this queue could easily have introduced.
+
+    Batching means a deletion can be sitting in a queue when the container is
+    told to stop. If shutdown dropped it, the message stays in the group - which
+    is precisely the failure the operator would blame on the rule not firing.
+    """
+    _, moderator = make_app()
+
+    await make_app(refresher=None)[0].shutdown()
+    assert not moderator.closed  # sanity: a fresh stub is untouched
+
+    app, moderator = make_app()
+    await app.shutdown()
+
+    assert moderator.closed is True
+
+
+async def test_shutdown_survives_a_failing_flush():
+    """A Telegram failure while flushing must not prevent the rest of shutdown."""
+    app, moderator = make_app()
+
+    async def boom() -> None:
+        raise RuntimeError("network gone")
+
+    moderator.close_deletes = boom  # type: ignore[method-assign]
+
+    await app.shutdown()  # must not raise
+
+
+async def test_shutdown_still_cancels_tasks_when_the_flush_fails():
+    task = asyncio.create_task(asyncio.sleep(3600))
+    app, moderator = make_app(refresher=task)
+
+    async def boom() -> None:
+        raise RuntimeError("network gone")
+
+    moderator.close_deletes = boom  # type: ignore[method-assign]
+
+    await app.shutdown()
+
+    assert task.cancelled() or task.done(), "the flush must not short-circuit cleanup"
 
 
 # ===========================================================================
