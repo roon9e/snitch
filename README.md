@@ -17,13 +17,28 @@ For every message in the guarded group, in order:
 
 | # | Check | If it fails |
 |---|-------|-------------|
-| 1 | Is this the configured group? | ignore |
-| 2 | Is there a real human sender? (not a bot, not an anonymous admin, not a channel post) | ignore |
-| 3 | Is the sender in `RESTRICTED_USERS`? | ignore |
-| 4 | Is this a whitelisted topic? | **ignore - rule does not apply here** |
-| 5 | Does the message address another restricted user? | ignore |
-| 6 | Is the sender a chat admin? (`IGNORE_ADMINS`) | log only - bots cannot restrict admins anyway |
-| 7 | **Violation** | delete, then optionally mute |
+| 1 | Was this message sent after this process started? (`PROCESS_BACKLOG`) | ignore |
+| 2 | Is this the configured group? | ignore |
+| 3 | Is there a real human sender? (not a bot, not an anonymous admin, not a channel post) | ignore |
+| 4 | Is the sender in `RESTRICTED_USERS`? | ignore |
+| 5 | Is this a whitelisted topic? | **ignore - rule does not apply here** |
+| 6 | Does the message address another restricted user, and not themselves? | ignore |
+| 7 | Is the sender a chat admin? (`IGNORE_ADMINS`) | log only - bots cannot restrict admins anyway |
+| 8 | **Violation** | delete, then optionally mute |
+
+### Only messages from this run are judged
+
+Telegram hands a bot a backlog of everything it missed, so the first minutes
+after any restart are full of messages sent while snitch was down. By default
+they are **ignored**, and only messages sent after the process started are
+considered.
+
+This matters because punishment is retrospective. A mute is not "3 days ago,
+for 24 hours" - it is *now*, for 24 hours. Replaying an old offence would
+silence someone for a day to answer something they said on Tuesday.
+
+Set `PROCESS_BACKLOG=true` to judge the backlog anyway. You almost certainly do
+not want this.
 
 ### What counts as "addressing another restricted user"
 
@@ -37,6 +52,10 @@ Any of the enabled detectors, and each one is a separate switch:
   text. This one is fuzzy on purpose: it catches `hey alice`, and it can be
   evaded by dropping the `@` or by renaming. Turn it off if you want only
   structured, unfakeable signals.
+
+Talking to **yourself** never counts. Replying to your own message is how people
+continue a thread, and `@yourself` is not contact with another restricted user.
+Only the *sender* is ever punished - the user they addressed is never touched.
 
 ---
 
@@ -150,6 +169,26 @@ Private chats ignore privacy mode. If that works but the group does not, privacy
 mode is the cause - fix it via `@BotFather` -> `/setprivacy` -> your bot ->
 `Disable`, then restart.
 
+### 8. "audit log disabled: cannot append to ..."
+
+Snitch runs as uid `10001`. If `./data` is a **bind mount**, it is owned by
+whoever created it on the host, and appending to `violations.jsonl` fails with
+`[Errno 13] Permission denied`.
+
+This is not fatal - deletion and muting still work - but you lose the record of
+who was caught and why. Two ways out:
+
+```bash
+# Best: let Docker own the storage. No chown, ever.
+# docker-compose.yml already declares the named volume `snitch-data`.
+
+# Or, if you need the records on the host for backup:
+sudo chown -R 10001:10001 ./data
+```
+
+snitch checks this at startup rather than discovering it on the first violation,
+and the warning names both uids and the exact `chown` to run.
+
 ---
 
 ## Configuration
@@ -170,8 +209,10 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 | `DETECT_MENTIONS` | `true` | Catch mentions |
 | `DETECT_BARE_USERNAMES` | `true` | Catch usernames in plain text |
 | `IGNORE_ADMINS` | `true` | Never touch admins |
+| `PROCESS_BACKLOG` | `false` | Never act on a message older than this process started |
 | `NOTICE_MODE` | `log` | `log`, `chat`, `dm` or `none` |
 | `ADMIN_IDS` | empty | Extra users allowed to run `/unmute`, `/check`, `/status` |
+| `REQUEST_TIMEOUT` | `30` | Per-request API timeout, `5..300`; lower it for a flaky proxy |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `text` | Set `LOG_FORMAT=json` for log shipping |
 | `DATA_DIR` | `/app/data` | Where `violations.jsonl` is written |
 

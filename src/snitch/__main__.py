@@ -8,6 +8,7 @@ import inspect
 import logging
 import signal
 import sys
+from datetime import datetime, timezone
 from types import FrameType
 
 from aiogram.exceptions import TelegramAPIError
@@ -27,6 +28,12 @@ _VALID_TOKEN_SHAPE = ":"
 
 def main() -> int:
     """Console entrypoint. Returns a process exit code."""
+    # Captured first, before config parsing and before preflight's network calls:
+    # this is the floor for the replay guard, and on a slow proxy preflight alone
+    # can take tens of seconds. Messages that arrive during startup are new and
+    # must be processed.
+    started_at = datetime.now(tz=timezone.utc)
+
     try:
         # BOT_TOKEN and CHAT_ID come from the environment, so mypy cannot see
         # them being satisfied here.
@@ -48,16 +55,16 @@ def main() -> int:
     logger.debug("effective configuration: %s", settings.redacted_summary())
 
     try:
-        return asyncio.run(run(settings))
+        return asyncio.run(run(settings, started_at))
     except KeyboardInterrupt:  # pragma: no cover - interactive
         logger.info("interrupted")
         return 130
 
 
-async def run(settings: Settings) -> int:
+async def run(settings: Settings, started_at: datetime | None = None) -> int:
     """Build, poll, and shut down cleanly. Returns an exit code."""
     try:
-        app = await _build_with_retry(settings)
+        app = await _build_with_retry(settings, started_at)
     except PreflightError as exc:
         # A permanent failure is the operator's to fix, so exit immediately and
         # let the container stop rather than crash-looping on the same message.
@@ -87,12 +94,12 @@ STARTUP_ATTEMPTS = 5
 STARTUP_BACKOFF_SECONDS = (5, 15, 30, 60)
 
 
-async def _build_with_retry(settings: Settings) -> App:
+async def _build_with_retry(settings: Settings, started_at: datetime | None = None) -> App:
     """Build the app, retrying only failures that could plausibly resolve."""
     last: PreflightError | None = None
     for attempt in range(1, STARTUP_ATTEMPTS + 1):
         try:
-            return await build_app(settings)
+            return await build_app(settings, started_at)
         except PreflightError as exc:
             last = exc
             if exc.permanent or attempt == STARTUP_ATTEMPTS:

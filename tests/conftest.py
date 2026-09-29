@@ -148,12 +148,32 @@ def make_settings(tmp_path: Path | None = None, **overrides: Any) -> Settings:
 
 
 def make_directory(
-    entries: tuple[tuple[int, str | None], ...] = ((ALICE_ID, "alice"), (BOB_ID, "bob")),
+    entries: tuple[tuple[int, str | None], ...] = (
+        (ALICE_ID, "alice"),
+        (BOB_ID, "bob"),
+    ),
 ) -> Directory:
     return Directory(
         entries=tuple(
             DirectoryEntry(user_id=user_id, username=username, configured_as=str(user_id))
             for user_id, username in entries
+        )
+    )
+
+
+def make_directory_with_carol() -> Directory:
+    """Alice, Bob and Carol.
+
+    Detection tests need a third restricted user: with only alice and bob, the
+    natural construction is "alice does something to bob", which made it easy to
+    accidentally write "alice targets alice" - the exact false positive that
+    shipping the bot must not produce.
+    """
+    return make_directory(
+        (
+            (ALICE_ID, "alice"),
+            (BOB_ID, "bob"),
+            (CAROL_ID, "carol"),
         )
     )
 

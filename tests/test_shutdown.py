@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -53,6 +54,7 @@ def make_app(
         settings=Settings(_env_file=None, bot_token="1:x", chat_id=-100),  # type: ignore[call-arg]
         directory=None,  # type: ignore[arg-type]
         liveness=LivenessMonitor(),
+        started_at=datetime.now(tz=timezone.utc),
         refresher=refresher,
         watcher_task=watcher_task,
     )

@@ -293,6 +293,12 @@ def detect(message: Message, settings: Settings, directory: Directory) -> Detect
     if settings.detect_bare_usernames:
         targets.extend(_bare_username_targets(message, directory))
 
+    # A user talking to themselves is not a violation. Replying to your own
+    # message is a normal way to continue a thread, and the rule only exists to
+    # stop restricted users addressing *each other*.
+    sender_id = message.from_user.id if message.from_user is not None else None
+    targets = [target for target in targets if target.user_id != sender_id]
+
     if not targets:
         return NO_DETECTION
     return Detection(targets=_dedupe(targets))

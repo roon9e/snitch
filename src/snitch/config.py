@@ -223,6 +223,21 @@ class Settings(BaseSettings):
     directory_refresh_hours: float = Field(default=6.0, ge=0.1, le=720.0)
     mute_cooldown_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
 
+    # --- network tuning ---------------------------------------------------
+    #: Per-request timeout, in seconds, for calls to the Telegram API. Lower it
+    #: when a proxy stalls: aiohttp's default is 30s, and the SOCKS connect
+    #: timeout defaults to 60s, so an unresponsive proxy can leave the bot blind
+    #: for up to a minute per attempt. Polling retries on its own, so a shorter
+    #: value means faster recovery rather than fewer retries.
+    request_timeout: float = Field(default=30.0, ge=5.0, le=300.0)
+
+    #: Act on messages that predate this process. Telegram replays a backlog
+    #: through getUpdates after downtime, so leaving this false is what stops a
+    #: restarting bot from retroactively deleting messages and starting mutes
+    #: for offences that already happened days ago. Set it to true only if you
+    #: deliberately want the backlog processed on the next start.
+    process_backlog: bool = False
+
     # --- observability ----------------------------------------------------
     log_level: str = "INFO"
     log_format: LogFormat = LogFormat.TEXT
@@ -438,5 +453,7 @@ class Settings(BaseSettings):
             "notice_mode": self.notice_mode.value,
             "log_level": self.log_level,
             "log_format": self.log_format.value,
+            "request_timeout": self.request_timeout,
+            "process_backlog": self.process_backlog,
             "data_dir": str(self.data_dir),
         }

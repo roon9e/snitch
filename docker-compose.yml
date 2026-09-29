@@ -44,8 +44,15 @@ services:
       TZ: ${TZ:-UTC}
 
     volumes:
-      # The append-only violations.jsonl audit log survives restarts.
-      - ./data:/app/data
+      # A *named* volume, not a bind mount. Docker seeds a new volume from the
+      # image's /app/data, which the Dockerfile already chowns to 10001, so this
+      # works with no host-side setup. A bind mount (./data:/app/data) inherits
+      # the *host's* ownership instead, and the container's unprivileged uid
+      # cannot write to it - which silently disables the audit log.
+      #
+      # To read violations.jsonl on the host, use a bind mount and fix the
+      # ownership first:   chown -R 10001:10001 ./data
+      - snitch-data:/app/data
 
     # PID 1 reaps zombies and forwards SIGTERM, so the bot can shut down
     # gracefully instead of being killed mid-request.
@@ -59,3 +66,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  snitch-data:

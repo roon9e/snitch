@@ -35,7 +35,10 @@ def build_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     attempts = {"count": 0}
     queue: list[BaseException] = []
 
-    async def fake_build(settings: Any) -> Any:  # noqa: ARG001 - must accept the call
+    async def fake_build(
+        settings: Any,  # noqa: ARG001 - must accept the call
+        started_at: Any = None,  # noqa: ARG001 - must accept the call
+    ) -> Any:
         attempts["count"] += 1
         if queue:
             raise queue.pop(0)
