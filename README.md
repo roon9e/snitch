@@ -225,8 +225,26 @@ The password is treated as a secret. It is not logged, it is masked in
 `/status`, it is hidden from `repr(settings)`, and both its percent-decoded and
 percent-encoded spellings are scrubbed from log output and tracebacks.
 
-The proxy is verified at startup like everything else: if it cannot be reached,
-snitch says so explicitly instead of reporting that your bot token is invalid.
+The proxy is verified at startup like everything else. `snitch` opens a short TCP
+connection to it and completes a real SOCKS handshake, so a bad proxy produces a
+**specific** verdict in a few seconds rather than an opaque 30-second request
+timeout raised from inside aiogram:
+
+| Verdict | What it means | What to do |
+|---|---|---|
+| `ok` | Reachable, and it answered a SOCKS greeting | Nothing |
+| `refused` | Host answered, nothing listening | Wrong port, proxy not running, or it binds to `127.0.0.1` only |
+| `timed_out` | Nothing answered — a **silent drop** | No route, a firewall discarding packets, or the host is down |
+| `dns_failed` | Proxy hostname unresolvable | Use the IP, or fix the container's DNS |
+| `not_socks` | Port open, no SOCKS handshake | Wrong service on the port, or the proxy requires credentials |
+
+`refused` vs `timed_out` is the distinction that matters: *refused* means
+something answered; *timed out* means packets are being discarded somewhere on
+the way. Every failure message ends with an `nc -vz` command to run **on the
+host**, where Docker is not in the way.
+
+A dead proxy is treated as transient rather than as a config error, so the bot
+retries with backoff instead of giving up - the proxy may well come back.
 
 ---
 
@@ -311,6 +329,7 @@ src/snitch/
   detection.py         the rule engine (pure)
   directory.py         RESTRICTED_USERS -> ids + usernames, with refresh
   preflight.py         startup checks; fails fast on missing admin rights
+  proxy_probe.py       pinpointing an unreachable proxy
   liveness.py          warns when the bot has seen nothing (privacy mode)
   permissions.py       the exact mute / unmute permission payloads
   bot.py               dependency graph, middleware, background tasks

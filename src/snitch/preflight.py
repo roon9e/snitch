@@ -74,6 +74,27 @@ def check_local(settings: Settings) -> None:
     _check_chat_id_shape(settings)
 
 
+async def check_proxy(settings: Settings) -> None:
+    """Confirm the proxy is reachable and really speaks SOCKS.
+
+    Runs before the token check so an unreachable proxy costs a few seconds and
+    yields a specific verdict, instead of an opaque 30 second request timeout
+    raised from inside aiogram. Transient by design: a proxy that is down now
+    may well be up on the next startup attempt.
+    """
+    from snitch.proxy_probe import probe
+
+    result = await probe(settings)
+    if result is None:
+        return
+
+    if result.ok:
+        logger.info("proxy reachable: %s", result.report())
+        return
+
+    raise PreflightError(result.report(), permanent=False)
+
+
 async def check_token(bot: Bot, settings: Settings) -> User:
     """Validate the bot token and that Telegram is reachable at all.
 

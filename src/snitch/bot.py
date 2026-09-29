@@ -113,6 +113,7 @@ async def build_app(settings: Settings) -> App:
         logger.info("routing Telegram traffic through %s", settings.proxy.redacted)
     try:
         preflight.check_local(settings)
+        await preflight.check_proxy(settings)
         me = await preflight.check_token(bot, settings)
         chat = await preflight.check_chat(bot, settings)
         directory = DirectoryHolder(await resolve(bot, settings))

@@ -77,6 +77,25 @@ class ProxyConfig:
         return bool(self._url)
 
     @property
+    def port(self) -> int | None:
+        """The explicit port from the URL, or ``None`` if it was omitted."""
+        return self._parts.port if self._parts is not None else None
+
+    @property
+    def host(self) -> str:
+        """The proxy hostname, or empty."""
+        return (self._parts.hostname or "") if self._parts is not None else ""
+
+    @property
+    def effective_port(self) -> int:
+        """The port that will actually be dialled, applying the scheme default."""
+        if self.port is not None:
+            return self.port
+        return DEFAULT_PROXY_PORTS.get(
+            (self._parts.scheme.lower() if self._parts is not None else ""), 1080
+        )
+
+    @property
     def url(self) -> str:
         """The URL to hand to ``AiohttpSession``."""
         return self._url
