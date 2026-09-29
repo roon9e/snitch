@@ -152,6 +152,96 @@ async def test_checklist_offers_a_private_chat_test(caplog):
     assert "PRIVATE" in message or "private" in message
 
 
+# ===========================================================================
+# the checklist is assembled per deployment, not fixed
+# ===========================================================================
+def test_the_checklist_names_the_bot_it_is_actually_running_as():
+    """Regression: the handle used to be hardcoded, which pointed every other
+    operator at this repository's own bot."""
+    message = make_monitor(bot_username="their_own_bot").checklist()
+
+    assert "@their_own_bot /id" in message
+    assert "snitch_punish_bot" not in message
+
+
+def test_no_handle_invents_none():
+    """Unknown username must not fall back to somebody else's handle."""
+    message = make_monitor(bot_username=None).checklist()
+
+    assert "@snitch_punish_bot" not in message
+    assert "private" in message.lower(), "the advice survives, only the @name goes"
+
+
+def test_a_stalled_proxy_is_offered_as_a_cause():
+    """A proxy that accepts and then goes quiet is indistinguishable from a deaf
+    bot by reading logs, so it belongs in the checklist when one is configured."""
+    message = make_monitor(proxy="socks5://user:***@10.0.0.1:1080").checklist()
+
+    assert "proxy is down or stalling" in message
+    assert "REQUEST_TIMEOUT" in message
+
+
+def test_the_proxy_cause_is_absent_when_no_proxy_is_configured():
+    """Advice about a proxy nobody configured is noise."""
+    message = make_monitor(proxy=None).checklist()
+
+    assert "proxy" not in message.lower()
+
+
+def test_the_proxy_url_in_the_warning_is_redacted():
+    """The checklist is a warning, not a place to leak a password."""
+    message = make_monitor(proxy="socks5://user:***@10.0.0.1:1080").checklist()
+
+    assert "***" in message
+    assert "hunter2" not in message
+
+
+def test_confirmed_privacy_mode_drops_off_the_list():
+    """Once checked in @BotFather it is a permanent property of the bot, so
+    repeating that advice forever buries the causes still live."""
+    message = make_monitor(privacy_mode_verified=True).checklist()
+
+    assert "setprivacy" not in message
+    assert "not a member" in message
+    assert "group is quiet" in message
+
+
+def test_confirmed_privacy_mode_also_drops_the_pointless_private_chat_test():
+    """The DM test exists to isolate privacy mode. With it ruled out, suggesting
+    it is a distraction."""
+    message = make_monitor(privacy_mode_verified=True).checklist()
+
+    assert "in private" not in message
+
+
+def test_the_checklist_still_warns_when_privacy_mode_is_ruled_out():
+    """Ruling out one cause must not silence the monitor; the bot can still be
+    blind for a reason that has nothing to do with privacy mode."""
+    monitor = make_monitor(privacy_mode_verified=True, grace_seconds=0.0)
+
+    assert monitor.should_warn() is True
+
+
+def test_a_verified_bot_with_a_proxy_still_gets_the_proxy_advice():
+    """The two exclusions are independent."""
+    message = make_monitor(
+        privacy_mode_verified=True,
+        proxy="socks5://user:***@10.0.0.1:1080",
+    ).checklist()
+
+    assert "proxy is down or stalling" in message
+    assert "setprivacy" not in message
+
+
+def test_the_causes_stay_numbered_in_order():
+    message = make_monitor(proxy="socks5://10.0.0.1:1080").checklist()
+
+    assert "  1. Privacy mode" in message
+    assert "  2. The proxy is down or stalling" in message
+    assert "  3. The bot is not a member" in message
+    assert "  4. The group is quiet" in message
+
+
 async def test_loop_stops_cleanly_on_cancel():
     monitor = make_monitor(grace_seconds=0.0, check_interval=0.01)
 

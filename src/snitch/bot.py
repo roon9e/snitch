@@ -192,11 +192,17 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
 
     # Privacy mode is invisible from the Bot API - there is no way to query it -
     # so say so loudly, where the operator will actually see it in the logs.
-    logger.info(
-        "reminder: snitch cannot verify privacy mode. If nothing is ever deleted, "
-        "check @BotFather -> /setprivacy -> %s -> Disable.",
-        me.username,
-    )
+    # PRIVACY_MODE_VERIFIED is the operator telling us they have checked, so the
+    # reminder stops rather than repeating forever about a solved problem.
+    if settings.privacy_mode_verified:
+        logger.info("privacy mode confirmed checked (PRIVACY_MODE_VERIFIED=true)")
+    else:
+        logger.info(
+            "reminder: snitch cannot verify privacy mode. If nothing is ever deleted, "
+            "check @BotFather -> /setprivacy -> %s -> Disable. Once you have checked it, "
+            "set PRIVACY_MODE_VERIFIED=true so this stops being repeated.",
+            me.username,
+        )
 
     audit = AuditLog(settings.data_dir)
     if audit.enabled:
@@ -220,7 +226,14 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
         samples=samples,
     )
 
-    liveness = LivenessMonitor()
+    liveness = LivenessMonitor(
+        privacy_mode_verified=settings.privacy_mode_verified,
+        # The checklist names the proxy when there is one, because a stalled
+        # proxy looks exactly like a deaf bot from the logs alone. Redacted, so
+        # the password never reaches the warning.
+        proxy=settings.proxy.redacted if settings.proxy.enabled else None,
+        bot_username=me.username,
+    )
     if settings.process_backlog:
         logger.warning(
             "PROCESS_BACKLOG is true: messages sent before %s will be acted on. "

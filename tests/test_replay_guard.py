@@ -248,6 +248,21 @@ def test_summary_reports_the_new_settings():
     assert summary["request_timeout"] == 30.0
 
 
+def test_privacy_mode_is_nagged_about_by_default():
+    """snitch cannot query it, so it must keep asking until told otherwise."""
+    assert make_settings().privacy_mode_verified is False
+
+
+def test_privacy_mode_verification_can_be_recorded():
+    assert make_settings(privacy_mode_verified=True).privacy_mode_verified is True
+
+
+def test_summary_reports_the_privacy_mode_attestation():
+    summary: dict[str, object] = make_settings(privacy_mode_verified=True).redacted_summary()
+
+    assert summary["privacy_mode_verified"] is True
+
+
 # ===========================================================================
 # it composes with a real dispatcher
 # ===========================================================================

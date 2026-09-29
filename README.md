@@ -154,20 +154,37 @@ image, see [Using a prebuilt image](#using-a-prebuilt-image).
 
 ### 7. If nothing happens
 
-The single most common cause is that **privacy mode is still on**. It is not
-queryable through the Bot API, and a bot that cannot see the group cannot be
-asked about it, so snitch says so itself: it logs a reminder at startup, and if
-ten minutes pass with no messages at all it logs the full checklist.
+If ten minutes pass with no messages at all, snitch logs a checklist. The causes
+are **assembled from your configuration**, not fixed, because "no messages" has
+several causes and only some apply to you:
 
-To confirm, message the bot **directly in private**:
+| Cause | When it is listed |
+|---|---|
+| Privacy mode is still `ON` | Unless `PRIVACY_MODE_VERIFIED=true` |
+| The proxy is down or stalling | Only when `PROXY_URL` is set |
+| The bot is not in the group, or `CHAT_ID` is wrong | Always |
+| The group is genuinely quiet | Always - harmless, and the warning stops on traffic |
+
+That ordering matters most if you use a proxy: a proxy that accepts the
+connection and then goes quiet produces **exactly** the same silence as a deaf
+bot, and nothing in the logs distinguishes them. If your bot goes quiet with a
+proxy configured, check the proxy first, then lower `REQUEST_TIMEOUT`.
+
+The most common cause overall is still privacy mode. It is not queryable through
+the Bot API, and a bot that cannot see the group cannot be asked about it, so
+snitch reminds you at every startup. To confirm, message the bot **directly in
+private**:
 
 ```
-@snitch_punish_bot  /id
+@your_bot  /id
 ```
 
 Private chats ignore privacy mode. If that works but the group does not, privacy
 mode is the cause - fix it via `@BotFather` -> `/setprivacy` -> your bot ->
 `Disable`, then restart.
+
+Once you have verified it, set `PRIVACY_MODE_VERIFIED=true` so the reminder
+stops. It is a permanent property of the bot, not of the chat.
 
 ### 8. "audit log disabled: cannot append to ..."
 
@@ -209,6 +226,7 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 | `DETECT_MENTIONS` | `true` | Catch mentions |
 | `DETECT_BARE_USERNAMES` | `true` | Catch usernames in plain text |
 | `IGNORE_ADMINS` | `true` | Never touch admins |
+| `PRIVACY_MODE_VERIFIED` | `false` | Set once you have confirmed `Disable` in @BotFather, to stop the reminder |
 | `PROCESS_BACKLOG` | `false` | Never act on a message older than this process started |
 | `NOTICE_MODE` | `log` | `log`, `chat`, `dm` or `none` |
 | `ADMIN_IDS` | empty | Extra users allowed to run `/unmute`, `/check`, `/status` |

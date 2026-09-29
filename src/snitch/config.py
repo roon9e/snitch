@@ -231,6 +231,13 @@ class Settings(BaseSettings):
     #: value means faster recovery rather than fewer retries.
     request_timeout: float = Field(default=30.0, ge=5.0, le=300.0)
 
+    #: Confirms you have checked @BotFather -> /setprivacy for this bot and it
+    #: reads Disable. Privacy mode is not queryable through the Bot API, so
+    #: snitch cannot tell whether it is deaf for this reason; left false, it
+    #: keeps reminding you. Set it once you have verified it - it is a permanent
+    #: property of the bot, not of the chat, so it never changes back.
+    privacy_mode_verified: bool = False
+
     #: Act on messages that predate this process. Telegram replays a backlog
     #: through getUpdates after downtime, so leaving this false is what stops a
     #: restarting bot from retroactively deleting messages and starting mutes
@@ -455,5 +462,6 @@ class Settings(BaseSettings):
             "log_format": self.log_format.value,
             "request_timeout": self.request_timeout,
             "process_backlog": self.process_backlog,
+            "privacy_mode_verified": self.privacy_mode_verified,
             "data_dir": str(self.data_dir),
         }
