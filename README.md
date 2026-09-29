@@ -225,26 +225,43 @@ The password is treated as a secret. It is not logged, it is masked in
 `/status`, it is hidden from `repr(settings)`, and both its percent-decoded and
 percent-encoded spellings are scrubbed from log output and tracebacks.
 
-The proxy is verified at startup like everything else. `snitch` opens a short TCP
-connection to it and completes a real SOCKS handshake, so a bad proxy produces a
-**specific** verdict in a few seconds rather than an opaque 30-second request
-timeout raised from inside aiogram:
+The proxy is verified at startup in two stages, because a reachable proxy and a
+*working* proxy fail for completely different reasons and the fixes do not
+overlap:
+
+1. A SOCKS5 handshake. Answers "is the proxy running?"
+2. A SOCKS5 `CONNECT` to `api.telegram.org:443`. Answers "can it actually get to
+   Telegram?" — the question when the handshake succeeds but every API call
+   times out. The bot token is never sent; the probe only talks to the proxy.
 
 | Verdict | What it means | What to do |
 |---|---|---|
-| `ok` | Reachable, and it answered a SOCKS greeting | Nothing |
-| `refused` | Host answered, nothing listening | Wrong port, proxy not running, or it binds to `127.0.0.1` only |
-| `timed_out` | Nothing answered — a **silent drop** | No route, a firewall discarding packets, or the host is down |
+| `ok` | Proxy answered, and tunnelled to the Bot API | Nothing |
+| `refused` | Host answered, nothing listening | Wrong port, proxy not running, or bound to `127.0.0.1` only |
+| `timed_out` | Nothing answered at all | No route, firewall discarding packets, host down |
 | `dns_failed` | Proxy hostname unresolvable | Use the IP, or fix the container's DNS |
-| `not_socks` | Port open, no SOCKS handshake | Wrong service on the port, or the proxy requires credentials |
+| `not_socks` | Port open, no SOCKS handshake | Wrong service on the port |
+| `auth_required` | Proxy is alive but demands credentials | Add them to `PROXY_URL` |
+| `tunnel_refused` | **Proxy is healthy** but refused the CONNECT | The proxy's own route to Telegram is dead |
+| `tunnel_stalled` | Proxy took the CONNECT, then went silent | Interference *inside* the tunnel |
 
-`refused` vs `timed_out` is the distinction that matters: *refused* means
-something answered; *timed out* means packets are being discarded somewhere on
-the way. Every failure message ends with an `nc -vz` command to run **on the
-host**, where Docker is not in the way.
+`refused` vs `timed_out` is the first distinction that matters: *refused* means
+something answered, *timed out* means packets are being discarded. Then
+`tunnel_refused` vs `tunnel_stalled` separates "the proxy cannot get to Telegram"
+from "something is dropping traffic once the tunnel is up" — the latter is
+usually TLS-level interference, and the fix is a different proxy or a different
+port, not a different `PROXY_URL`.
 
-A dead proxy is treated as transient rather than as a config error, so the bot
-retries with backoff instead of giving up - the proxy may well come back.
+Every failure message ends with commands to run **on the host**, where Docker is
+not in the way:
+
+```bash
+nc -vz HOST PORT
+curl --socks5-hostname HOST:PORT https://api.telegram.org/
+```
+
+A bad proxy is treated as transient rather than as a config error, so the bot
+retries with backoff instead of giving up.
 
 ---
 

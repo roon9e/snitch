@@ -61,29 +61,56 @@ async def closed(server: asyncio.AbstractServer) -> None:
         await asyncio.wait_for(server.wait_closed(), 2)
 
 
-async def socks5_server(reply: bytes = b"\x05\x00", accepted: list[str] | None = None):
-    """Minimal SOCKS5 server: reads a greeting, answers, closes."""
+async def socks5_server(
+    greeting: bytes = b"\x05\x00",
+    connect_reply: bytes | None = b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00",
+    accepted: list[bytes] | None = None,
+    reply: bytes | None = None,
+):
+    """A SOCKS5 server that answers a greeting and a CONNECT.
+
+    ``connect_reply`` of ``None`` makes it accept the CONNECT and then stay
+    silent, which is the stalled-tunnel case.
+    """
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
-            request = await asyncio.wait_for(reader.readexactly(3), 2)
+            hello = await asyncio.wait_for(reader.readexactly(3), 2)
             if accepted is not None:
-                accepted.append(request.hex())
-            writer.write(reply)
+                accepted.append(hello)
+            writer.write(reply if reply is not None else greeting)
             await writer.drain()
+
+            head = await asyncio.wait_for(reader.readexactly(4), 2)
+            atyp = head[3]
+            if atyp == 0x01:
+                body = await asyncio.wait_for(reader.readexactly(4), 2)
+            elif atyp == 0x03:
+                length = (await asyncio.wait_for(reader.readexactly(1), 2))[0]
+                body = await asyncio.wait_for(reader.readexactly(length), 2)
+            else:
+                body = await asyncio.wait_for(reader.readexactly(16), 2)
+            port_bytes = await asyncio.wait_for(reader.readexactly(2), 2)
+            if accepted is not None:
+                accepted.append(head + body + port_bytes)
+
+            if connect_reply is not None:
+                writer.write(connect_reply)
+                await writer.drain()
+            else:
+                # Accepted the CONNECT, then go quiet like a filtered tunnel.
+                await asyncio.sleep(5)
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
             pass
         finally:
             writer.close()
-            with contextlib.suppress(OSError):
-                await writer.wait_closed()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     return server, int(server.sockets[0].getsockname()[1])
 
 
 async def test_reachable_socks_proxy_is_ok():
-    accepted: list[str] = []
+    accepted: list[bytes] = []
     server, port = await socks5_server(accepted=accepted)
     try:
         result = await probe(socks_settings(port))
@@ -93,7 +120,128 @@ async def test_reachable_socks_proxy_is_ok():
     assert result is not None
     assert result.ok is True
     assert result.verdict is Verdict.OK
-    assert accepted == ["050100"], "must send a real SOCKS5 greeting, not just connect"
+    assert accepted[0] == b"\x05\x01\x00", "must send a real SOCKS5 greeting"
+
+
+async def test_probe_confirms_a_full_tunnel_to_the_bot_api():
+    """Reachability alone is not enough - the reported case had a healthy proxy
+    that could not tunnel to Telegram, and the only symptom was a request
+    timeout. The probe must exercise CONNECT, not just the handshake."""
+    accepted: list[bytes] = []
+    server, port = await socks5_server(accepted=accepted)
+    try:
+        result = await probe(socks_settings(port))
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.ok is True
+    # The server records the greeting and the CONNECT as two separate reads.
+    assert len(accepted) == 2, f"a greeting and a CONNECT, got {accepted}"
+    assert accepted[0] == b"\x05\x01\x00", "greeting offers SOCKS5, no auth"
+    assert accepted[1][:3] == b"\x05\x01\x00", "CMD must be CONNECT"
+    assert b"api.telegram.org" in accepted[1]
+    assert accepted[1][-2:] == (443).to_bytes(2, "big")
+
+
+async def test_probe_never_sends_the_bot_token():
+    """The probe talks to the proxy, not to Telegram. A credential must not be
+    handed to a third party just to test reachability."""
+    accepted: list[bytes] = []
+    server, port = await socks5_server(accepted=accepted)
+    settings = make_settings(chat_id=SUPERGROUP_ID, proxy_url=f"socks5://a:b@127.0.0.1:{port}")
+    try:
+        await probe(settings)
+    finally:
+        await closed(server)
+
+    assert accepted
+    assert b"api.telegram.org" in accepted[1]
+    assert not any(b"TEST_TOKEN" in chunk for chunk in accepted)
+
+
+async def test_auth_required_proxy_is_reported_distinctly():
+    """The proxy is alive, so this must not read like a dead one."""
+    server, port = await socks5_server(greeting=b"\x05\x02")
+    try:
+        result = await probe(socks_settings(port))
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.verdict is Verdict.AUTH_REQUIRED
+    assert "username/password" in result.detail
+    assert "socks5://user:password@host:port" in result.report()
+
+
+async def test_connect_refused_by_the_proxy_names_the_reply_code():
+    """SOCKS reply 0x04 means the proxy itself cannot reach the destination -
+    the single most useful thing the probe can say, and instantly."""
+    server, port = await socks5_server(connect_reply=b"\x05\x04\x00\x01" + b"\x00" * 6)
+    try:
+        result = await probe(socks_settings(port))
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.verdict is Verdict.TUNNEL_REFUSED
+    assert "0x04" in result.detail
+    assert "cannot reach the destination" in result.detail
+    assert "the proxy is healthy" in result.report()
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [(0x01, "general"), (0x03, "network unreachable"), (0x05, "refused by the destination")],
+)
+async def test_every_common_socks_reply_is_translated(code, expected):
+    server, port = await socks5_server(connect_reply=bytes([0x05, code, 0x00, 0x01]) + b"\x00" * 6)
+    try:
+        result = await probe(socks_settings(port))
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.verdict is Verdict.TUNNEL_REFUSED
+    assert expected in result.detail
+
+
+async def test_stalled_tunnel_is_reported_as_stalled():
+    """Proxy accepts CONNECT then goes quiet: interference inside the tunnel."""
+    server, port = await socks5_server(connect_reply=None)
+    try:
+        result = await probe(socks_settings(port), timeout=1.0)
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.verdict is Verdict.TUNNEL_STALLED
+    assert "went silent" in result.report()
+    assert "api.telegram.org:443" in result.report()
+
+
+async def test_tunnel_check_can_be_skipped():
+    """Handshake-only mode, for the unit tests that do not care about CONNECT."""
+    server, port = await socks5_server(connect_reply=None)
+    try:
+        result = await probe(socks_settings(port), timeout=1.0, check_tunnel=False)
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.verdict is Verdict.OK
+
+
+async def test_socks4_server_is_still_accepted():
+    """A SOCKS4 server answers the greeting with 0x04 and stops there."""
+    server, port = await socks5_server(greeting=b"\x04\x00")
+    try:
+        result = await probe(socks_settings(port), check_tunnel=False)
+    finally:
+        await closed(server)
+
+    assert result is not None
+    assert result.ok is True
 
 
 async def test_ok_report_names_the_proxy():
@@ -249,6 +397,60 @@ def report_for(verdict: Verdict, detail: str = "") -> str:
     return ProbeResult(verdict=verdict, target="10.0.0.5:1080", detail=detail).report()
 
 
+def test_tunnel_refused_does_not_blame_reachability():
+    """The proxy answered instantly, so the message must not read as if it is
+    unreachable - that sends people to debug the wrong thing."""
+    report = report_for(Verdict.TUNNEL_REFUSED, "SOCKS reply 0x04 (host unreachable)")
+    assert "the proxy is healthy" in report
+    assert "not its" in report
+    assert "nothing is listening" not in report
+
+
+def test_auth_required_message_points_at_proxurl_credentials():
+    report = report_for(Verdict.AUTH_REQUIRED, "the proxy requires authentication")
+    assert "requires authentication" in report
+    assert "socks5://user:password@host:port" in report
+
+
+def test_tunnel_refused_message_names_the_reply_and_the_fix():
+    report = report_for(Verdict.TUNNEL_REFUSED, "SOCKS reply 0x04 (host unreachable)")
+    assert "0x04" in report
+    assert "host unreachable" in report
+    assert "cannot reach the destination" in report
+    assert "curl --socks5-hostname" in report
+    assert "api.telegram.org" in report
+
+
+def test_tunnel_stalled_message_names_interference_not_a_dead_proxy():
+    report = report_for(Verdict.TUNNEL_STALLED, "no reply to CONNECT")
+    assert "went silent" in report
+    assert "interference" in report
+    assert "dropped" in report
+    assert "127.0.0.1 only" not in report, "the loopback trap is the wrong advice here"
+
+
+def test_every_failure_verdict_offers_a_curl_command():
+    for verdict in Verdict:
+        if verdict is Verdict.OK:
+            continue
+        assert "curl --socks5-hostname" in report_for(verdict), verdict
+
+
+def test_no_verdict_recommends_127001_for_a_working_tunnel():
+    """Only the loopback-binding case deserves that advice."""
+    assert "127.0.0.1 only" in report_for(Verdict.REFUSED)
+    for verdict in (
+        Verdict.TIMED_OUT,
+        Verdict.DNS_FAILED,
+        Verdict.NOT_SOCKS,
+        Verdict.AUTH_REQUIRED,
+        Verdict.TUNNEL_REFUSED,
+        Verdict.TUNNEL_STALLED,
+        Verdict.UNREACHABLE,
+    ):
+        assert "127.0.0.1 only" not in report_for(verdict), verdict
+
+
 def test_report_falls_back_to_the_bare_target_without_a_display():
     """Synthetic results carry no display; the message must still be useful."""
     report = report_for(Verdict.REFUSED)
@@ -332,7 +534,7 @@ async def test_unreachable_proxy_fails_preflight_as_transient():
         await preflight.check_proxy(socks_settings(closed_port()))
 
     assert excinfo.value.permanent is False, "a proxy may come back; do not give up"
-    assert "cannot reach the proxy" in str(excinfo.value)
+    assert "cannot reach the Telegram API" in str(excinfo.value)
 
 
 async def test_preflight_error_never_contains_the_password():
