@@ -118,7 +118,9 @@ class TextFormatter(RedactingFormatter):
 def configure_logging(settings: Settings) -> None:
     """Install a single redacting handler on the root logger."""
     level = getattr(logging, settings.log_level, logging.INFO)
-    secrets = (settings.token,)
+    # Both the bot token and any proxy password. settings.secrets drops empties,
+    # so a proxy-less deployment does not scrub the empty string.
+    secrets = settings.secrets
     formatter: logging.Formatter = (
         JsonFormatter(secrets) if settings.log_format is LogFormat.JSON else TextFormatter(secrets)
     )

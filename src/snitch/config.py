@@ -11,6 +11,7 @@ import re
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Final
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -26,6 +27,20 @@ GENERAL_TOPIC: Final[str] = "general"
 _USERNAME_RE: Final[re.Pattern[str]] = re.compile(r"^@?(?P<name>[A-Za-z0-9_]{4,32})$")
 _LINK_PREFIXES: Final[tuple[str, ...]] = ("https://t.me/", "http://t.me/", "t.me/", "tg://")
 
+#: Proxy schemes ``aiohttp_socks.parse_proxy_url`` can actually parse. Note that
+#: ``socks5h`` is NOT accepted even though many tools take it - and it is
+#: unnecessary here, because aiogram hardcodes ``rdns=True``, so DNS is always
+#: resolved by the proxy rather than locally.
+PROXY_SCHEMES: Final[tuple[str, ...]] = ("socks5", "socks4", "http", "https")
+
+#: Port assumed when the URL omits one.
+DEFAULT_PROXY_PORTS: Final[dict[str, int]] = {
+    "socks5": 1080,
+    "socks4": 1080,
+    "http": 8080,
+    "https": 8080,
+}
+
 
 class NoticeMode(str, Enum):
     """What to do after a violation, besides deleting the message."""
@@ -39,6 +54,68 @@ class NoticeMode(str, Enum):
 class LogFormat(str, Enum):
     TEXT = "text"
     JSON = "json"
+
+
+class ProxyConfig:
+    """An outbound proxy for every Telegram API call, given as one URL.
+
+    Existence is derived from ``PROXY_URL`` being non-empty rather than a
+    separate on/off flag, so "enabled but no host" is not a reachable state.
+
+    The password inside the URL is treated as a secret: it is never logged, never
+    included in :meth:`Settings.redacted_summary`, and is added to the log
+    scrubber so it cannot leak through an exception message.
+    """
+
+    def __init__(self, url: str = "") -> None:
+        self._url = url.strip()
+        self._parts = urlsplit(self._url) if self._url else None
+
+    @property
+    def enabled(self) -> bool:
+        """Whether a proxy was configured."""
+        return bool(self._url)
+
+    @property
+    def url(self) -> str:
+        """The URL to hand to ``AiohttpSession``."""
+        return self._url
+
+    @property
+    def password(self) -> str:
+        """The proxy password, decoded. Empty if there is none."""
+        if self._parts is None or self._parts.password is None:
+            return ""
+        return unquote(self._parts.password)
+
+    @property
+    def password_encoded(self) -> str:
+        """The proxy password exactly as it appears in the URL.
+
+        A connection error or a log line containing the raw URL shows the
+        percent-encoded form, so both spellings must be scrubbed.
+        """
+        if self._parts is None or self._parts.password is None:
+            return ""
+        return self._parts.password
+
+    @property
+    def redacted(self) -> str:
+        """Safe to log: the password is replaced, never printed."""
+        if self._parts is None:
+            return "disabled"
+        host = self._parts.hostname or ""
+        if self._parts.port:
+            host = f"{host}:{self._parts.port}"
+        if self._parts.username:
+            return f"{self._parts.scheme}://{self._parts.username}:***@{host}"
+        return f"{self._parts.scheme}://***@{host}"
+
+    def __bool__(self) -> bool:
+        return self.enabled
+
+    def __repr__(self) -> str:
+        return f"ProxyConfig({self.redacted})"
 
 
 def normalize_username(raw: str) -> str | None:
@@ -95,6 +172,16 @@ class Settings(BaseSettings):
     # --- required ---------------------------------------------------------
     bot_token: SecretStr
     chat_id: int | str
+
+    # --- network ----------------------------------------------------------
+    #: Outbound proxy for every Telegram API call, e.g.
+    #: ``socks5://user:password@127.0.0.1:1080``. Empty means direct.
+    #:
+    #: ``repr=False`` because a pydantic repr lists raw field values, and this
+    #: one embeds a password. ``bot_token`` is a SecretStr and safe by
+    #: construction; a bare str is not, so it is hidden from repr/str outright.
+    #: Use redacted_summary() for a dump that is safe to print.
+    proxy_url: str = Field(default="", repr=False)
 
     # --- the rule ---------------------------------------------------------
     restricted_users: Annotated[list[int | str], NoDecode] = Field(default_factory=list)
@@ -180,6 +267,53 @@ class Settings(BaseSettings):
                 topics.append(normalized)
         return topics
 
+    @field_validator("proxy_url")
+    @classmethod
+    def _validate_proxy_url(cls, value: str) -> str:
+        """Validate the proxy URL up front, with messages worth reading.
+
+        Rejecting a bad proxy here matters: the alternative is a connection error
+        several layers down that looks like a Telegram outage.
+        """
+        url = value.strip()
+        if not url:
+            return ""
+
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+
+        if scheme == "socks5h":
+            raise ValueError(
+                "PROXY_URL must not use socks5h: aiohttp_socks rejects that scheme. "
+                "Use socks5 - DNS is already resolved by the proxy, so socks5h adds "
+                "nothing here."
+            )
+        if scheme not in PROXY_SCHEMES:
+            raise ValueError(
+                f"PROXY_URL scheme {scheme or '(missing)'!r} is not supported; "
+                f"use one of: {', '.join(PROXY_SCHEMES)}"
+            )
+        if not parts.hostname:
+            raise ValueError(
+                f"PROXY_URL {ProxyConfig(url).redacted!r} has no host; expected something "
+                f"like {scheme}://user:password@127.0.0.1:1080"
+            )
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError(f"PROXY_URL has an invalid port: {exc}") from exc
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError(f"PROXY_URL port {port} is out of range")
+        if parts.username and parts.password is None:
+            raise ValueError(
+                "PROXY_URL has a username but no password; give both or neither. "
+                "A username with an empty password is rejected by most SOCKS servers."
+            )
+        if parts.password and not parts.username:
+            raise ValueError("PROXY_URL has a password but no username; give both or neither.")
+
+        return url
+
     @field_validator("bot_token")
     @classmethod
     def _validate_token(cls, value: SecretStr) -> SecretStr:
@@ -229,6 +363,26 @@ class Settings(BaseSettings):
         return self.bot_token.get_secret_value()
 
     @property
+    def proxy(self) -> ProxyConfig:
+        """The validated outbound proxy."""
+        return ProxyConfig(self.proxy_url)
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        """Every value that must never reach a log sink.
+
+        Includes both spellings of a proxy password: percent-decoded, which is
+        what connection errors tend to contain, and percent-encoded, which is
+        what the raw ``PROXY_URL`` contains.
+        """
+        proxy = self.proxy
+        unique: list[str] = []
+        for value in (self.token, proxy.password_encoded, proxy.password):
+            if value and value not in unique:
+                unique.append(value)
+        return tuple(unique)
+
+    @property
     def whitelist_thread_ids(self) -> frozenset[int]:
         """Numeric forum topic ids that bypass the rule."""
         return frozenset(int(topic) for topic in self.whitelist_topic_ids if topic != GENERAL_TOPIC)
@@ -252,6 +406,7 @@ class Settings(BaseSettings):
         return {
             "chat_id": self.chat_id,
             "bot_token": "***redacted***",
+            "proxy_url": self.proxy.redacted,
             "restricted_users": list(self.restricted_users),
             "whitelist_topic_ids": list(self.whitelist_topic_ids),
             "delete_message": self.delete_message,

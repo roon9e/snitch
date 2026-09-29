@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.types import Message, TelegramObject, Update
 
@@ -81,10 +82,21 @@ class DebugMiddleware(BaseMiddleware):
 
 
 def create_bot(settings: Settings) -> Bot:
-    """Construct the Telegram client."""
+    """Construct the Telegram client, routed through the proxy if configured.
+
+    ``AiohttpSession(proxy=...)`` swaps aiohttp's ``TCPConnector`` for
+    ``aiohttp_socks.ProxyConnector``, and hardcodes ``rdns=True`` - so hostnames
+    are resolved *by the proxy*. That matters: a resolver that is itself blocked
+    would otherwise fail the connection before the proxy is ever used.
+    """
+    session = AiohttpSession(proxy=settings.proxy.url) if settings.proxy.enabled else None
+    kwargs: dict[str, object] = {}
+    if session is not None:
+        kwargs["session"] = session
     return Bot(
         token=settings.token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -97,9 +109,11 @@ async def build_app(settings: Settings) -> App:
     warnings that are all just consequences of the bot not being in the group.
     """
     bot = create_bot(settings)
+    if settings.proxy.enabled:
+        logger.info("routing Telegram traffic through %s", settings.proxy.redacted)
     try:
         preflight.check_local(settings)
-        me = await preflight.check_token(bot)
+        me = await preflight.check_token(bot, settings)
         chat = await preflight.check_chat(bot, settings)
         directory = DirectoryHolder(await resolve(bot, settings))
         await preflight.check_rights(bot, settings, me.id)

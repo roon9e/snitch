@@ -160,6 +160,7 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 |---|---|---|
 | `BOT_TOKEN` | *required* | Token from @BotFather |
 | `CHAT_ID` | *required* | Supergroup id (`-100...`) or `@username` |
+| `PROXY_URL` | empty | Route API calls through a proxy, e.g. `socks5://user:pass@host:1080` |
 | `RESTRICTED_USERS` | *required* | Comma separated user ids and/or `@usernames` |
 | `WHITELIST_TOPIC_IDS` | empty | Topic ids where the rule is off; `general` for the General topic |
 | `DELETE_MESSAGE` | `true` | Delete the offending message |
@@ -189,6 +190,43 @@ restriction longer than 366 days into a **permanent** ban.
 | `/status` | admins | Active config, each restricted user's current state, last violations |
 | `/check` | admins | Replay the rule over recent messages |
 | `/unmute <id\|@user>` | admins | Lift a restriction early |
+
+---
+
+## Proxy
+
+If the host cannot reach `api.telegram.org` directly, set one variable:
+
+```dotenv
+PROXY_URL=socks5://127.0.0.1:1080
+PROXY_URL=socks5://user:password@proxy.example.com:1080
+PROXY_URL=http://user:password@proxy.example.com:3128
+```
+
+Empty (the default) means connect directly.
+
+**Supported schemes:** `socks5`, `socks4`, `http`, `https`.
+
+**Use `socks5`, not `socks5h`.** `aiohttp_socks` rejects `socks5h` outright, and
+it would gain nothing here anyway: aiogram hardcodes `rdns=True`, so **DNS is
+always resolved by the proxy** and your local resolver never sees
+`api.telegram.org`. That is what makes the connection work on a network with a
+hijacked or blocked resolver.
+
+| Gotcha | What to do |
+|---|---|
+| Port omitted | Fine. Defaults to `1080` for socks, `8080` for http. |
+| Password contains `@ : / ? #` | Percent-encode it: `%40 %3A %2F %3F %23`. An unencoded `@` makes the parser read the rest of the URL as the hostname. |
+| Proxy runs on the Docker **host** | `127.0.0.1` is the *container*. Use `host.docker.internal` or the host's LAN IP. |
+| Username without a password (or the reverse) | Rejected at startup. Most SOCKS servers refuse it, and it is nearly always a typo. |
+| Proxy goes down | Treated as a network error, not a config error: retried in-process with backoff, and the message names the proxy (never its password). |
+
+The password is treated as a secret. It is not logged, it is masked in
+`/status`, it is hidden from `repr(settings)`, and both its percent-decoded and
+percent-encoded spellings are scrubbed from log output and tracebacks.
+
+The proxy is verified at startup like everything else: if it cannot be reached,
+snitch says so explicitly instead of reporting that your bot token is invalid.
 
 ---
 

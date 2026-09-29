@@ -106,7 +106,7 @@ async def run_all(bot: PreflightBot, settings: Any = None) -> None:
     """Run the whole preflight sequence in production order."""
     settings = settings if settings is not None else make_settings(chat_id=SUPERGROUP_ID)
     preflight.check_local(settings)
-    me = await preflight.check_token(bot)  # type: ignore[arg-type]
+    me = await preflight.check_token(bot, settings)  # type: ignore[arg-type]
     chat = await preflight.check_chat(bot, settings)  # type: ignore[arg-type]
     await preflight.check_rights(bot, settings, me.id)  # type: ignore[arg-type]
     preflight.check_config(settings, make_directory())

@@ -19,7 +19,12 @@ import logging
 
 import aiohttp
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter, TelegramServerError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import Chat, ChatMemberAdministrator, ChatMemberOwner, User
 
 from snitch.config import Settings
@@ -31,6 +36,10 @@ logger = logging.getLogger(__name__)
 _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
     TelegramServerError,
     TelegramRetryAfter,
+    # aiohttp wraps connection failures - an unreachable proxy included - in
+    # TelegramNetworkError. It subclasses TelegramAPIError, so without listing it
+    # here a dead proxy would be treated as permanent and give up immediately.
+    TelegramNetworkError,
     aiohttp.ClientError,
     asyncio.TimeoutError,
     OSError,
@@ -65,14 +74,21 @@ def check_local(settings: Settings) -> None:
     _check_chat_id_shape(settings)
 
 
-async def check_token(bot: Bot) -> User:
-    """Validate the bot token.
+async def check_token(bot: Bot, settings: Settings) -> User:
+    """Validate the bot token and that Telegram is reachable at all.
 
     Split out from :func:`run` so that a bad token is reported before anything
     else is attempted, rather than after a screen of failed lookups.
     """
     try:
         me = await bot.get_me()
+    except TelegramNetworkError as exc:
+        # AIOHTTP reports every connection failure this way, so a dead proxy
+        # lands here. Saying "your token is invalid" would be actively wrong.
+        raise PreflightError(
+            f"cannot reach the Telegram API: {_describe(exc)}{_network_hint(settings)}",
+            permanent=False,
+        ) from exc
     except TelegramAPIError as exc:
         raise PreflightError(
             f"BOT_TOKEN looks invalid: {_describe(exc)}\n"
@@ -81,6 +97,23 @@ async def check_token(bot: Bot) -> User:
         ) from exc
     logger.info("signed in as @%s (id %s)", me.username, me.id)
     return me
+
+
+def _network_hint(settings: Settings) -> str:
+    """Extra guidance when the API could not be reached."""
+    if not settings.proxy.enabled:
+        return (
+            "\n\nsnitch connects directly to api.telegram.org. If this host is behind a"
+            "\nfirewall or a network that blocks it, set PROXY_URL in .env, e.g."
+            "\n  PROXY_URL=socks5://user:password@127.0.0.1:1080"
+        )
+    return (
+        f"\n\nsnitch is configured to use {settings.proxy.redacted} and could not connect."
+        "\nCheck that the proxy is running, reachable from the container, and that"
+        "\nPROXY_URL's host, port and credentials are correct."
+        "\nIf the proxy runs on the Docker host, '127.0.0.1' is the container itself;"
+        "\nuse 'host.docker.internal' or the host's LAN IP instead."
+    )
 
 
 async def check_chat(bot: Bot, settings: Settings) -> Chat:
