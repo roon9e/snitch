@@ -130,6 +130,26 @@ docker compose up -d
 docker compose logs -f
 ```
 
+The image is built from your checkout. If you would rather pull a prebuilt
+image, see [Using a prebuilt image](#using-a-prebuilt-image).
+
+### 7. If nothing happens
+
+The single most common cause is that **privacy mode is still on**. It is not
+queryable through the Bot API, and a bot that cannot see the group cannot be
+asked about it, so snitch says so itself: it logs a reminder at startup, and if
+ten minutes pass with no messages at all it logs the full checklist.
+
+To confirm, message the bot **directly in private**:
+
+```
+@snitch_punish_bot  /id
+```
+
+Private chats ignore privacy mode. If that works but the group does not, privacy
+mode is the cause - fix it via `@BotFather` -> `/setprivacy` -> your bot ->
+`Disable`, then restart.
+
 ---
 
 ## Configuration
@@ -171,6 +191,27 @@ restriction longer than 366 days into a **permanent** ban.
 | `/unmute <id\|@user>` | admins | Lift a restriction early |
 
 ---
+
+## Using a prebuilt image
+
+`docker compose up` builds from your checkout. The compose file pins
+`pull_policy: build` and an overridable `IMAGE`, so pointing it at a registry
+image is a one-liner:
+
+```bash
+IMAGE=ghcr.io/roon9e/snitch:1.0.0 docker compose up -d
+```
+
+> **No published image yet.** The `gh` token this repo was created with has no
+> `write:packages` scope, so nothing has been pushed to `ghcr.io`. To publish:
+> grant the repository `read:packages` + `write:packages` under
+> *Settings -> Actions -> General -> Workflow permissions*, then
+> `gh auth refresh -h github.com -s write:packages`, then push a `v*` tag.
+
+`pull_policy: build` is also what stops a confusing failure: without it,
+compose resolves the unqualified `snitch:1.0.0` as `docker.io/library/snitch`,
+tries Docker Hub, prints `pull access denied for snitch`, and only then falls
+back to building locally.
 
 ## The mute caveat, in full
 
@@ -225,9 +266,10 @@ src/snitch/
   detection.py         the rule engine (pure)
   directory.py         RESTRICTED_USERS -> ids + usernames, with refresh
   preflight.py         startup checks; fails fast on missing admin rights
+  liveness.py          warns when the bot has seen nothing (privacy mode)
   permissions.py       the exact mute / unmute permission payloads
-  bot.py               dependency graph, middleware, refresh task
-  __main__.py          config, logging, signals, shutdown
+  bot.py               dependency graph, middleware, background tasks
+  __main__.py          config, logging, signals, startup retry, shutdown
   handlers/
     watch.py           the pipeline above
     commands.py        /id /status /check /unmute

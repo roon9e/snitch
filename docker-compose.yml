@@ -11,7 +11,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: snitch:1.0.0
+    # A local tag, built from this checkout. `pull_policy: build` is what stops
+    # compose from trying to pull `snitch:1.0.0` from Docker Hub (an unnamespaced
+    # reference is read as docker.io/library/snitch) and failing with
+    # "pull access denied" before falling back to a local build.
+    #
+    # To run a published image instead, override on the command line:
+    #   docker compose run --rm -e IMAGE=ghcr.io/roon9e/snitch:1.0.0 ...
+    # see README "Using a prebuilt image".
+    image: ${IMAGE:-snitch:1.0.0}
+    pull_policy: build
     container_name: snitch
 
     # `on-failure:3` rather than `unless-stopped`: a wrong CHAT_ID or a missing

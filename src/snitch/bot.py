@@ -22,6 +22,7 @@ from snitch.config import Settings
 from snitch.directory import DirectoryHolder, resolve
 from snitch.handlers.commands import build_router as build_command_router
 from snitch.handlers.watch import RecentSamples, Watcher
+from snitch.liveness import LivenessMonitor
 from snitch.services.audit import AuditLog
 from snitch.services.moderator import Moderator
 from snitch.services.notifier import Notifier
@@ -40,20 +41,31 @@ class App:
     dispatcher: Dispatcher
     settings: Settings
     directory: DirectoryHolder
+    liveness: LivenessMonitor
     refresher: asyncio.Task[None] | None = None
+    watcher_task: asyncio.Task[None] | None = None
 
     async def shutdown(self) -> None:
         """Cancel background work and close the HTTP session."""
-        if self.refresher is not None and not self.refresher.done():
-            self.refresher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self.refresher
+        for task in (self.refresher, self.watcher_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.bot.session.close()
         logger.info("shutdown complete")
 
 
 class DebugMiddleware(BaseMiddleware):
-    """One debug line per update. Cheap, and invaluable when tuning detection."""
+    """Records every update for the liveness monitor, and optionally logs it.
+
+    The dump is guarded by an explicit level check: ``model_dump`` is a full
+    pydantic serialisation, and evaluating the argument would run it for every
+    message in the group even with logging at INFO.
+    """
+
+    def __init__(self, liveness: LivenessMonitor | None = None) -> None:
+        self._liveness = liveness
 
     async def __call__(
         self,
@@ -61,7 +73,10 @@ class DebugMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, object],
     ) -> object:
-        logger.debug("update: %s", event.model_dump(exclude_none=True))
+        if self._liveness is not None:
+            self._liveness.record()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("update: %s", event.model_dump(exclude_none=True))
         return await handler(event, data)  # type: ignore[operator]
 
 
@@ -95,6 +110,14 @@ async def build_app(settings: Settings) -> App:
         await bot.session.close()
         raise
 
+    # Privacy mode is invisible from the Bot API - there is no way to query it -
+    # so say so loudly, where the operator will actually see it in the logs.
+    logger.info(
+        "reminder: snitch cannot verify privacy mode. If nothing is ever deleted, "
+        "check @BotFather -> /setprivacy -> %s -> Disable.",
+        me.username,
+    )
+
     audit = AuditLog(settings.data_dir)
     if audit.enabled:
         logger.info("audit log -> %s", audit.path)
@@ -117,8 +140,9 @@ async def build_app(settings: Settings) -> App:
         samples=samples,
     )
 
+    liveness = LivenessMonitor()
     dispatcher = Dispatcher()
-    dispatcher.update.outer_middleware(DebugMiddleware())
+    dispatcher.update.outer_middleware(DebugMiddleware(liveness))
 
     # Both are included as sub-routers, in priority order. A catch-all
     # registered directly with `dispatcher.message.register(...)` is checked
@@ -138,11 +162,18 @@ async def build_app(settings: Settings) -> App:
 
     _register_error_handler(dispatcher)
 
-    app = App(bot=bot, dispatcher=dispatcher, settings=settings, directory=directory)
+    app = App(
+        bot=bot,
+        dispatcher=dispatcher,
+        settings=settings,
+        directory=directory,
+        liveness=liveness,
+    )
     app.refresher = asyncio.create_task(
         _refresh_directory(bot, settings, directory),
         name="snitch-directory-refresh",
     )
+    app.watcher_task = asyncio.create_task(liveness.run(), name="snitch-liveness")
     return app
 
 

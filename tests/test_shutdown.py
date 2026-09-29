@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from snitch import __main__ as entrypoint
 from snitch.bot import App
 from snitch.config import Settings
+from snitch.liveness import LivenessMonitor
 
 
 class StubDispatcher:
@@ -41,14 +42,19 @@ class StubBot:
         self.session = StubSession()
 
 
-def make_app(refresher: asyncio.Task[None] | None = None) -> App:
+def make_app(
+    refresher: asyncio.Task[None] | None = None,
+    watcher_task: asyncio.Task[None] | None = None,
+) -> App:
     """A real App wired to stub collaborators."""
     return App(
         bot=StubBot(),  # type: ignore[arg-type]
         dispatcher=StubDispatcher(),  # type: ignore[arg-type]
         settings=Settings(_env_file=None, bot_token="1:x", chat_id=-100),  # type: ignore[call-arg]
         directory=None,  # type: ignore[arg-type]
+        liveness=LivenessMonitor(),
         refresher=refresher,
+        watcher_task=watcher_task,
     )
 
 
@@ -180,6 +186,31 @@ async def test_shutdown_tolerates_an_already_finished_refresher():
     await task
 
     await make_app(refresher=task).shutdown()
+
+
+async def test_shutdown_cancels_the_liveness_task():
+    """The liveness loop must not outlive the process."""
+    app = make_app()
+    app.watcher_task = asyncio.create_task(app.liveness.run())
+    await asyncio.sleep(0)
+
+    await app.shutdown()
+
+    assert app.watcher_task.cancelled() or app.watcher_task.done()
+
+
+async def test_shutdown_cancels_both_background_tasks():
+    async def forever() -> None:
+        await asyncio.sleep(3600)
+
+    refresher = asyncio.create_task(forever())
+    liveness_task = asyncio.create_task(forever())
+    await asyncio.sleep(0)
+
+    await make_app(refresher=refresher, watcher_task=liveness_task).shutdown()
+
+    assert refresher.cancelled() or refresher.done()
+    assert liveness_task.cancelled() or liveness_task.done()
 
 
 # ===========================================================================
