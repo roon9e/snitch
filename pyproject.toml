@@ -32,6 +32,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
     "ruff>=0.9",
 ]
 
@@ -46,6 +47,12 @@ packages = ["src/snitch"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# A hung test must fail the run, not stall it. thread method rather than signal,
+# so it still works under pytest-asyncio's event loop. This exists because a
+# test performing a real DNS lookup wedged a CI run: loop.getaddrinfo runs in the
+# default ThreadPoolExecutor, cannot be cancelled, and is joined at teardown.
+timeout = 120
+timeout_method = "thread"
 filterwarnings = ["error::DeprecationWarning:snitch.*"]
 
 [tool.ruff]

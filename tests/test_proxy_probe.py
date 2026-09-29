@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import socket
 import sys
+from typing import NoReturn
 
 import pytest
 
@@ -174,13 +175,50 @@ async def test_a_silent_port_is_not_called_socks():
     assert "never answered" in result.detail
 
 
-async def test_unresolvable_host_does_not_report_success():
-    """Either NXDOMAIN or a blackholed resolver, but never a false OK."""
+async def test_unresolvable_host_is_reported_as_dns_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Deterministic: the resolver is stubbed rather than exercised.
+
+    A real lookup for a non-existent name cannot be bounded. ``wait_for``
+    returns promptly, but ``loop.getaddrinfo`` runs in the default
+    ThreadPoolExecutor and cannot be cancelled, so the executor is joined during
+    loop teardown. Measured here at 2.00s in the call and 9.07s in teardown -
+    and on a CI resolver that blackholes instead of returning NXDOMAIN that wait
+    is unbounded, which is what wedged the first CI run. Stubbing the resolver
+    tests the code under test (that gaierror is caught and classified) without
+    inheriting the environment's DNS behaviour.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> NoReturn:  # noqa: ARG001 - must accept any signature
+        raise socket.gaierror(-2, "Name or service not known")
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", refuse)
     result = await probe(socks_settings(1080, host="no-such-host.invalid"), timeout=2.0)
 
     assert result is not None
-    assert result.ok is False
-    assert result.verdict in (Verdict.DNS_FAILED, Verdict.TIMED_OUT)
+    assert result.verdict is Verdict.DNS_FAILED
+    assert "cannot resolve" in result.detail
+    assert "IP address" in result.report()
+
+
+async def test_an_ip_literal_needs_no_resolver(monkeypatch: pytest.MonkeyPatch):
+    """An IP host must not depend on DNS at all. This is the common case, and
+    the one that cannot be slowed down by a broken resolver."""
+
+    def explode(*args: object, **kwargs: object) -> NoReturn:  # noqa: ARG001 - must accept any signature
+        raise AssertionError("an IP literal must not trigger a DNS lookup")
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", explode)
+    server, port = await socks5_server()
+    try:
+        result = await probe(socks_settings(port, host="127.0.0.1"))
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert result is not None
+    assert result.ok is True
 
 
 async def test_ipv6_literal_target_is_bracketed():
@@ -198,6 +236,28 @@ async def test_ipv6_literal_target_is_bracketed():
 # ===========================================================================
 def report_for(verdict: Verdict, detail: str = "") -> str:
     return ProbeResult(verdict=verdict, target="10.0.0.5:1080", detail=detail).report()
+
+
+def test_report_falls_back_to_the_bare_target_without_a_display():
+    """Synthetic results carry no display; the message must still be useful."""
+    report = report_for(Verdict.REFUSED)
+
+    assert "10.0.0.5:1080" in report
+    assert "nc -vz 10.0.0.5 1080" in report
+
+
+def test_report_shows_the_username_but_never_the_password():
+    result = ProbeResult(
+        verdict=Verdict.REFUSED,
+        target="10.0.0.5:1080",
+        detail="connection refused",
+        display="socks5://alice:***@10.0.0.5:1080",
+    )
+
+    report = result.report()
+    assert "alice" in report
+    assert "***" in report
+    assert "nc -vz 10.0.0.5 1080" in report, "the nc hint must use the bare host"
 
 
 def test_every_failure_verdict_has_a_remedy():
@@ -265,15 +325,20 @@ async def test_unreachable_proxy_fails_preflight_as_transient():
 
 
 async def test_preflight_error_never_contains_the_password():
+    """A closed port keeps this instant and deterministic. The verdict differs
+    from a timeout, but both travel the same path into the operator-facing
+    message, which is what is being asserted."""
     settings = make_settings(
         chat_id=SUPERGROUP_ID,
-        proxy_url="socks5://alice:hunter2@10.255.255.1:1080",
+        proxy_url=f"socks5://alice:hunter2@127.0.0.1:{closed_port()}",
     )
 
     with pytest.raises(PreflightError) as excinfo:
         await preflight.check_proxy(settings)
 
-    assert "hunter2" not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "hunter2" not in message
+    assert "alice" in message, "the username is not a secret and aids diagnosis"
 
 
 async def test_probe_is_skipped_entirely_without_a_proxy():

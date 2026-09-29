@@ -89,9 +89,14 @@ class ProbeResult:
     """The verdict plus the raw detail, for the log and for the operator."""
 
     verdict: Verdict
+    #: Bare ``host:port``, used to build the suggested ``nc`` command.
     target: str
     detail: str = ""
     elapsed: float = 0.0
+    #: Redacted proxy form, e.g. ``socks5://alice:***@host:1080``. Shown to the
+    #: operator because the username aids diagnosis and is not a secret, while
+    #: the password never appears.
+    display: str = ""
 
     @property
     def ok(self) -> bool:
@@ -100,14 +105,15 @@ class ProbeResult:
 
     def report(self) -> str:
         """A full, readable explanation."""
+        where = self.display or self.target
         if self.ok:
-            return f"SOCKS proxy at {self.target} answered in {self.elapsed:.2f}s"
+            return f"SOCKS proxy at {where} answered in {self.elapsed:.2f}s"
 
         remedy = _REMEDIES[self.verdict].format(timeout=DEFAULT_PROBE_TIMEOUT)
         host, _, port = self.target.rpartition(":")
         return "\n".join(
             [
-                f"cannot reach the proxy at {self.target}: {self.detail or self.verdict.value}",
+                f"cannot reach the proxy at {where}: {self.detail or self.verdict.value}",
                 "",
                 remedy,
                 "",
@@ -133,6 +139,7 @@ async def probe(settings: Settings, timeout: float = DEFAULT_PROBE_TIMEOUT) -> P
     # suggested nc command wrong.
     display_host = f"[{host}]" if ":" in host else host
     target = f"{display_host}:{port}"
+    display = proxy.redacted
     loop = asyncio.get_running_loop()
     started = loop.time()
 
@@ -142,6 +149,7 @@ async def probe(settings: Settings, timeout: float = DEFAULT_PROBE_TIMEOUT) -> P
             target=target,
             detail=detail,
             elapsed=loop.time() - started,
+            display=display,
         )
 
     try:
