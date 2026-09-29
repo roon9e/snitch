@@ -3,10 +3,9 @@
 # Not run on ordinary pushes - only when a v* tag is pushed, so `main` never
 # depends on registry access.
 #
-# PREREQUISITE (one-time, cannot be done from a token that lacks the scope):
-#   1. Repository -> Settings -> Actions -> General -> Workflow permissions
-#      -> Read and write permissions
-#   2. Locally: gh auth refresh -h github.com -s write:packages
+# PREREQUISITE (one-time, in the repository settings):
+#   Settings -> Actions -> General -> Workflow permissions
+#   -> Read and write permissions
 #
 # Then:  git tag v1.0.0 && git push origin v1.0.0
 #
@@ -21,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and push (e.g. v1.0.0)"
+        description: "Tag to build and publish (e.g. v1.0.0)"
         required: true
 
 permissions:
@@ -51,6 +50,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # `ref` must be passed explicitly: on workflow_dispatch github.ref is
+          # the branch, not the tag, so semver patterns would match nothing and
+          # the only tag produced would be "latest".
+          ref: ${{ inputs.tag || github.ref }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -68,12 +71,18 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify the pushed image runs
-        # `steps.meta.outputs.tags` is MULTILINE (every tag, newline separated),
-        # so using it here would make the shell try to execute the first line as
-        # a command. `outputs.version` is the single primary tag.
+        # steps.meta.outputs.tags is a MULTILINE list of every tag, and
+        # outputs.version is not reliably a full reference (on a non-semver ref
+        # it collapses to a bare "latest"). Taking the first line is the only
+        # formulation that works in every case: expanding the whole list inline
+        # would make bash try to execute the first line as a command.
         run: |
-          docker run --rm --entrypoint sh '${{ steps.meta.outputs.version }}' -c \
+          set -euo pipefail
+          primary="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -1)"
+          echo "primary tag: $primary"
+          test -n "$primary"
+          docker pull --platform linux/amd64 "$primary"
+          docker run --rm --platform linux/amd64 --entrypoint sh "$primary" -c \
             'python -c "import snitch, aiogram, aiohttp_socks; print(snitch.__version__, aiogram.__version__)"'
-          echo "published: ${{ steps.meta.outputs.version }}"
-          echo "also tagged:"
-          echo '${{ steps.meta.outputs.tags }}'
+          echo "tags published:"
+          printf '%s\n' '${{ steps.meta.outputs.tags }}'
