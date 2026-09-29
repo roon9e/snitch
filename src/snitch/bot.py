@@ -29,6 +29,7 @@ from snitch.liveness import LivenessMonitor
 from snitch.services.audit import AuditLog
 from snitch.services.moderator import Moderator
 from snitch.services.notifier import Notifier
+from snitch.wordlist import WordList
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
         me = await preflight.check_token(bot, settings)
         chat = await preflight.check_chat(bot, settings)
         directory = DirectoryHolder(await resolve(bot, settings))
-        await preflight.check_rights(bot, settings, me.id)
+        await preflight.check_rights(bot, settings, me.id, chat)
         preflight.check_config(settings, directory.current)
         preflight.check_topic_hint(chat, settings)
     except BaseException:
@@ -218,12 +219,34 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
         notifier=Notifier(bot, settings),
     )
     samples = RecentSamples()
+    wordlist = WordList(settings.wordlist_path)
+    wordlist.reload()
+    if wordlist.size:
+        logger.info(
+            "word blacklist: %d entries from %s (%d unusable lines ignored)",
+            wordlist.size,
+            wordlist.path,
+            wordlist.skipped,
+        )
+    elif wordlist.path.exists():
+        logger.warning(
+            "word blacklist: %s exists but yielded no usable entries; the word rule is inactive",
+            wordlist.path,
+        )
+    else:
+        logger.info(
+            "word blacklist: no list at %s, so the word rule is inactive "
+            "(create the file and it is picked up without a restart)",
+            wordlist.path,
+        )
+
     watcher = Watcher(
         bot=bot,
         settings=settings,
         directory=directory,
         moderator=moderator,
         samples=samples,
+        wordlist=wordlist,
     )
 
     liveness = LivenessMonitor(
@@ -262,7 +285,7 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
     # before any included router's filters and would therefore shadow the
     # command handlers completely - no command would ever run.
     dispatcher.include_router(
-        build_command_router(bot, settings, directory, moderator, samples, audit)
+        build_command_router(bot, settings, directory, moderator, samples, audit, wordlist)
     )
 
     watch_router = Router(name="watcher")

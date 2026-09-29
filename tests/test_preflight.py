@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from aiogram.exceptions import (
     TelegramBadRequest,
+    TelegramNetworkError,
     TelegramServerError,
 )
 from aiogram.types import (
@@ -22,6 +23,7 @@ from aiogram.types import (
     ChatMemberAdministrator,
     ChatMemberMember,
     ChatMemberOwner,
+    ChatPermissions,
     User,
 )
 from pydantic import SecretStr
@@ -52,6 +54,7 @@ class PreflightBot:
         member_status: str = "administrator",
         can_delete_messages: bool = True,
         can_restrict_members: bool = True,
+        can_send_messages: bool | None = True,
         is_forum: bool = True,
         chat_type: str = "supergroup",
         get_me_error: Exception | None = None,
@@ -60,6 +63,7 @@ class PreflightBot:
         self.member_status = member_status
         self.can_delete_messages = can_delete_messages
         self.can_restrict_members = can_restrict_members
+        self.can_send_messages = can_send_messages
         self.is_forum = is_forum
         self.chat_type = chat_type
         self.get_me_error = get_me_error
@@ -76,7 +80,17 @@ class PreflightBot:
         self.chat_calls.append(chat_id)
         if self.get_chat_error:
             raise self.get_chat_error
-        return Chat.model_construct(id=chat_id, type=self.chat_type, is_forum=self.is_forum)
+        # `permissions` is what getChat returns for the requesting bot, and is
+        # the only place the ability to send can be read - the admin member
+        # record cannot express it.
+        permissions = (
+            None
+            if self.can_send_messages is None
+            else ChatPermissions(can_send_messages=self.can_send_messages)
+        )
+        return Chat.model_construct(
+            id=chat_id, type=self.chat_type, is_forum=self.is_forum, permissions=permissions
+        )
 
     async def get_chat_member(self, **kwargs: Any) -> Any:
         if kwargs.get("user_id") == self.bot_user.id:
@@ -108,7 +122,7 @@ async def run_all(bot: PreflightBot, settings: Any = None) -> None:
     preflight.check_local(settings)
     me = await preflight.check_token(bot, settings)  # type: ignore[arg-type]
     chat = await preflight.check_chat(bot, settings)  # type: ignore[arg-type]
-    await preflight.check_rights(bot, settings, me.id)  # type: ignore[arg-type]
+    await preflight.check_rights(bot, settings, me.id, chat)  # type: ignore[arg-type]
     preflight.check_config(settings, make_directory())
     preflight.check_topic_hint(chat, settings)
 
@@ -197,6 +211,69 @@ async def test_basic_group_id_message_explains_the_id_change():
 async def test_positive_chat_id_is_rejected():
     with pytest.raises(PreflightError, match="is not a chat id"):
         await run_all(PreflightBot(), make_settings(chat_id=12345))
+
+
+# ===========================================================================
+# the ability to send: the silent "dead but working" bot
+# ===========================================================================
+async def test_a_bot_that_cannot_send_is_refused_at_startup():
+    """The bug this exists for.
+
+    A bot with 'Delete messages' but no 'Send messages' looks perfectly healthy:
+    it catches every violation, so the operator concludes it is working - while
+    every command is silently dropped, and /unmute does not exist. Nothing in
+    the logs said a word.
+    """
+    bot = PreflightBot(can_send_messages=False)
+
+    with pytest.raises(PreflightError, match="cannot send messages"):
+        await run_all(bot)
+
+
+async def test_the_send_failure_explains_the_silent_symptom():
+    bot = PreflightBot(can_send_messages=False)
+
+    with pytest.raises(PreflightError) as caught:
+        await run_all(bot)
+
+    message = str(caught.value)
+    assert "/unmute" in message, "the operator needs to know what is unreachable"
+    assert "looks like" in message, "and why nothing ever complained"
+
+
+async def test_a_bot_that_can_send_passes():
+    bot = PreflightBot(can_send_messages=True)
+
+    await run_all(bot)  # must not raise
+
+
+async def test_absent_permissions_means_unrestricted_and_passes():
+    """`permissions: null` is what a normal, unrestricted bot gets back."""
+    bot = PreflightBot(can_send_messages=None)
+
+    await run_all(bot)  # must not raise
+
+
+async def test_sending_is_checked_even_when_deleting_is_disabled():
+    """Otherwise DELETE_MESSAGE=false becomes a way to lose the commands."""
+    bot = PreflightBot(can_send_messages=False)
+
+    with pytest.raises(PreflightError, match="cannot send messages"):
+        await run_all(bot, make_settings(delete_message=False))
+
+
+async def test_an_unreadable_permission_set_does_not_block_startup():
+    """'Cannot tell' is not 'cannot send': failing here would be a worse outage
+    than the thing being checked."""
+    bot = PreflightBot(
+        can_send_messages=None, get_chat_error=TelegramNetworkError(method=None, message="timeout")
+    )
+
+    # check_chat itself will fail first, which is the correct outcome for an
+    # unreachable chat; the point is that check_rights does not add a second,
+    # different complaint about permissions.
+    with pytest.raises(PreflightError, match="cannot read CHAT_ID"):
+        await run_all(bot)
 
 
 async def test_supergroup_id_shape_is_accepted():

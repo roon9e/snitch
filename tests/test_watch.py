@@ -17,6 +17,7 @@ from aiogram.types import (
 )
 
 from snitch.handlers.watch import RecentSamples, Watcher
+from snitch.wordlist import WordList
 from tests.conftest import (
     ALICE_ID,
     BOB_ID,
@@ -69,6 +70,7 @@ def build_watcher(
     bot: SpyBot | None = None,
     *,
     samples: RecentSamples | None = None,
+    wordlist: WordList | None = None,
     **overrides: Any,
 ) -> tuple[Watcher, SpyBot, RecordingModerator, RecentSamples]:
     spy = bot or SpyBot()
@@ -81,8 +83,17 @@ def build_watcher(
         directory=make_holder(),
         moderator=moderator,  # type: ignore[arg-type]
         samples=buffer_,
+        wordlist=wordlist,
     )
     return watcher, spy, moderator, buffer_
+
+
+def build_wordlist(tmp_path: Any, body: str) -> WordList:
+    path = tmp_path / "wordlist.txt"
+    path.write_text(body, encoding="utf-8")
+    wordlist = WordList(path, min_reload_interval=0.0)
+    wordlist.reload()
+    return wordlist
 
 
 def alice_replies_to_bob(**overrides: Any) -> Any:
@@ -116,6 +127,130 @@ async def test_message_from_an_unrestricted_user_is_ignored():
 
     assert await watcher.handle(message) is None
     assert moderator.handled == []
+
+
+# ===========================================================================
+# the word blacklist, in the pipeline
+# ===========================================================================
+async def test_a_restricted_user_using_a_banned_word_is_punished(tmp_path):
+    """The whole point: a word is enough, with no other user addressed."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="this is forbidden"))
+
+    assert len(moderator.handled) == 1
+    assert "forbidden" in moderator.handled[0][1]
+
+
+async def test_an_unrestricted_user_using_a_banned_word_is_ignored(tmp_path):
+    """Scoped deliberately: the blacklist punishes the people you listed, not
+    the whole chat. A filter that mutes every member of a busy group over a word
+    mistake is one nobody keeps switched on."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+
+    message = make_message(make_user(STRANGER_ID, "stranger"), text="this is forbidden")
+
+    assert await watcher.handle(message) is None
+    assert moderator.handled == []
+
+
+async def test_a_banned_word_in_a_whitelisted_topic_is_ignored(tmp_path):
+    """The whitelist is the one place the operator said nothing happens. Adding a
+    second rule later must not quietly extend enforcement into it."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, moderator, _ = build_watcher(
+        wordlist=wordlist,
+        whitelist_thread_ids="42",
+    )
+
+    message = make_message(make_user(ALICE_ID, "alice"), text="forbidden", thread_id=42)
+
+    assert await watcher.handle(message) is None
+    assert moderator.handled == []
+
+
+async def test_a_banned_word_from_an_admin_is_skipped(tmp_path):
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    bot = SpyBot(status="administrator")
+    watcher, _, moderator, _ = build_watcher(bot, wordlist=wordlist)
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="forbidden"))
+
+    assert moderator.handled == []
+
+
+async def test_a_word_and_a_contact_are_both_reported(tmp_path):
+    """They are independent rules; one message can trip both."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+
+    await watcher.handle(
+        make_message(
+            make_user(ALICE_ID, "alice"),
+            text="forbidden",
+            reply_to_sender=make_user(BOB_ID, "bob"),
+        )
+    )
+
+    assert len(moderator.handled) == 1
+    summary = moderator.handled[0][1]
+    assert "reply" in summary
+    assert "forbidden" in summary
+
+
+async def test_a_banned_word_in_a_caption_is_caught(tmp_path):
+    """Entities live on the caption for media, and so does the text to filter."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+
+    message = make_message(make_user(ALICE_ID, "alice"), caption="look at this forbidden thing")
+
+    await watcher.handle(message)
+
+    assert len(moderator.handled) == 1
+
+
+async def test_no_wordlist_configured_means_no_word_rule():
+    watcher, _, moderator, _ = build_watcher()
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="forbidden"))
+
+    assert moderator.handled == []
+
+
+async def test_an_empty_wordlist_is_harmless(tmp_path):
+    wordlist = build_wordlist(tmp_path, "# nothing here yet\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="anything at all"))
+
+    assert moderator.handled == []
+
+
+async def test_the_watcher_picks_up_an_edited_file(tmp_path):
+    """No restart: the reason this is a file rather than an env var."""
+    wordlist = build_wordlist(tmp_path, "first\n")
+    watcher, _, moderator, _ = build_watcher(wordlist=wordlist)
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="second"))
+    assert moderator.handled == []
+
+    (tmp_path / "wordlist.txt").write_text("second\n", encoding="utf-8")
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="second"))
+
+    assert len(moderator.handled) == 1
+
+
+async def test_a_word_hit_is_still_buffered_for_check(tmp_path):
+    """Otherwise /check would under-report, and /check is the tuning aid."""
+    wordlist = build_wordlist(tmp_path, "forbidden\n")
+    watcher, _, _, samples = build_watcher(wordlist=wordlist)
+
+    await watcher.handle(make_message(make_user(ALICE_ID, "alice"), text="forbidden"))
+
+    assert samples.all()[0].was_violation is True
 
 
 async def test_bot_messages_are_ignored():

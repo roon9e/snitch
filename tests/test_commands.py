@@ -23,15 +23,18 @@ from aiogram.types import (
     Update,
 )
 
+from snitch.bot import UpdateMiddleware
 from snitch.handlers.commands import build_router
 from snitch.handlers.watch import RecentSamples, Watcher
 from snitch.services.audit import AuditLog
 from snitch.services.moderator import Moderator
 from snitch.services.notifier import Notifier
+from snitch.wordlist import WordList
 from tests.conftest import (
     ALICE_ID,
     BOB_ID,
     CHAT_ID,
+    STRANGER_ID,
     make_holder,
     make_message,
     make_settings,
@@ -109,7 +112,13 @@ class CommandBot:
         return [str(item.get("text", "")) for item in self.sent]
 
 
-def build_dispatcher(bot: CommandBot, tmp_path: Any, **overrides: Any) -> Dispatcher:
+def build_dispatcher(
+    bot: CommandBot,
+    tmp_path: Any,
+    *,
+    wordlist: WordList | None = None,
+    **overrides: Any,
+) -> Dispatcher:
     settings = make_settings(tmp_path=tmp_path, **overrides)
     directory = make_holder()
     audit = AuditLog(tmp_path)
@@ -129,8 +138,20 @@ def build_dispatcher(bot: CommandBot, tmp_path: Any, **overrides: Any) -> Dispat
         samples=samples,
     )
     dispatcher = Dispatcher()
+    # Mirrors src/snitch/bot.py: the update middleware sits in front of every
+    # command in production, so a command test that skips it is not testing the
+    # path the bot actually runs.
+    dispatcher.update.outer_middleware(UpdateMiddleware(started_at=datetime.now(tz=timezone.utc)))
     dispatcher.include_router(
-        build_router(bot, settings, directory, moderator, samples, audit)  # type: ignore[arg-type]
+        build_router(
+            bot,  # type: ignore[arg-type]
+            settings,
+            directory,
+            moderator,
+            samples,
+            audit,
+            wordlist,
+        )
     )
 
     # Mirrors src/snitch/bot.py: the watcher must be its own included router.
@@ -252,6 +273,72 @@ async def test_commands_and_the_watcher_coexist_on_one_dispatcher(tmp_path):
 
     assert bot.replies, "the command router was shadowed by the watcher"
     assert str(CHAT_ID) in bot.replies[-1]
+
+
+def loaded_wordlist(tmp_path: Any, body: str) -> WordList:
+    """A word list read from a real file, as it would be in production."""
+    path = tmp_path / "wordlist.txt"
+    path.write_text(body, encoding="utf-8")
+    wordlist = WordList(path, min_reload_interval=0.0)
+    wordlist.reload()
+    return wordlist
+
+
+async def test_blacklist_reports_a_loaded_file(tmp_path):
+    """A file-based rule fails in ways a config switch cannot: a volume that was
+    not mounted, a typo in a regex, a wrong path. This answers "is it live?"."""
+    bot = CommandBot()
+    wordlist = loaded_wordlist(tmp_path, "alpha\nbeta\n")
+    dispatcher = build_dispatcher(bot, tmp_path, wordlist=wordlist)
+
+    await dispatcher.feed_update(bot, update_from("/blacklist", message_id=9))  # type: ignore[arg-type]
+
+    reply = bot.replies[-1]
+    assert "active entries</code> = 2" in reply
+    assert "alpha" in reply
+
+
+async def test_blacklist_says_so_when_the_file_is_missing(tmp_path):
+    bot = CommandBot()
+    wordlist = WordList(tmp_path / "absent.txt", min_reload_interval=0.0)
+    dispatcher = build_dispatcher(bot, tmp_path, wordlist=wordlist)
+
+    await dispatcher.feed_update(bot, update_from("/blacklist", message_id=10))  # type: ignore[arg-type]
+
+    reply = bot.replies[-1]
+    assert "does not exist" in reply
+    assert "without a restart" in reply
+
+
+async def test_blacklist_surfaces_unusable_lines(tmp_path):
+    """Silently ignoring a third of someone's list is the worst outcome."""
+    bot = CommandBot()
+    wordlist = loaded_wordlist(tmp_path, "good\nre:[unclosed\n")
+    dispatcher = build_dispatcher(bot, tmp_path, wordlist=wordlist)
+
+    await dispatcher.feed_update(bot, update_from("/blacklist", message_id=11))  # type: ignore[arg-type]
+
+    assert "unusable lines</code> = 1" in bot.replies[-1]
+
+
+async def test_blacklist_is_admin_only(tmp_path):
+    bot = CommandBot()
+    dispatcher = build_dispatcher(bot, tmp_path, wordlist=WordList(tmp_path / "w.txt"))
+
+    await dispatcher.feed_update(  # type: ignore[arg-type]
+        bot, update_from("/blacklist", sender_id=STRANGER_ID, message_id=12)
+    )
+
+    assert "administrators only" in bot.replies[-1]
+
+
+async def test_help_mentions_blacklist(tmp_path):
+    bot = CommandBot()
+    dispatcher = build_dispatcher(bot, tmp_path)
+
+    await dispatcher.feed_update(bot, update_from("/help", message_id=13))  # type: ignore[arg-type]
+
+    assert "/blacklist" in bot.replies[-1]
 
 
 async def test_check_output_lists_blocked_messages(tmp_path):

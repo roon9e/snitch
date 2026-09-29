@@ -22,6 +22,7 @@ from snitch.directory import DirectoryHolder
 from snitch.handlers.watch import RecentSamples
 from snitch.services.audit import AuditLog
 from snitch.services.moderator import Moderator
+from snitch.wordlist import WordList
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ _HELP = (
     "<code>/id</code> - chat id, your user id, current topic id\n"
     "<code>/status</code> - active config, restricted users, recent punishments\n"
     "<code>/check</code> - replay the rule over recent messages (tuning aid)\n"
+    "<code>/blacklist</code> - is the word list loaded, and what is in it\n"
     "<code>/unmute &lt;user_id|@username&gt;</code> - lift a restriction early\n"
     "<code>/help</code> - this text"
 )
@@ -42,6 +44,7 @@ def build_router(
     moderator: Moderator,
     samples: RecentSamples,
     audit: AuditLog,
+    wordlist: WordList | None = None,
 ) -> Router:
     """Wire up the command handlers with their dependencies.
 
@@ -163,6 +166,51 @@ def build_router(
             "\n".join(lines)[:4000],
             disable_web_page_preview=True,
         )
+
+    @router.message(Command("blacklist"))
+    async def cmd_blacklist(message: Message) -> None:
+        """Show whether the word list loaded.
+
+        Exists because a file-based rule fails silently in a way a .env switch
+        cannot: a typo in a regex, a volume that was not mounted, a path that is
+        wrong. This answers "is my list actually live?" without reading the log.
+        """
+        if not await _is_authorized(message):
+            await _deny(message)
+            return
+
+        if wordlist is None:
+            await message.answer("The word blacklist is not enabled in this build.")
+            return
+
+        wordlist.refresh()
+        entries = wordlist.entries()
+        lines = [
+            "<b>Word blacklist</b>",
+            f"<code>file</code> = {escape(str(wordlist.path))}",
+            f"<code>exists</code> = {'yes' if wordlist.path.exists() else 'no'}",
+            f"<code>active entries</code> = {len(entries)}",
+        ]
+        if wordlist.skipped:
+            lines.append(
+                f"<code>unusable lines</code> = {wordlist.skipped} "
+                "(check the log; those lines are ignored)"
+            )
+        if wordlist.error:
+            lines.append(f"<code>last error</code> = {escape(wordlist.error)}")
+        if not wordlist.path.exists():
+            lines.append("")
+            lines.append(
+                "The file does not exist, so the word rule is inactive. Create it and "
+                "snitch picks it up without a restart."
+            )
+        elif entries:
+            lines.append("")
+            lines.append("<b>First entries</b>")
+            lines.extend(f"<code>{escape(entry)}</code>" for entry in entries[:15])
+            if len(entries) > 15:
+                lines.append(f"<i>...and {len(entries) - 15} more</i>")
+        await message.answer("\n".join(lines)[:4000], disable_web_page_preview=True)
 
     @router.message(Command("unmute"))
     async def cmd_unmute(message: Message, command: CommandObject) -> None:

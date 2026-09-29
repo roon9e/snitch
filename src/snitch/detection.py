@@ -50,21 +50,49 @@ class Target:
 
 @dataclass(frozen=True, slots=True)
 class Detection:
-    """The set of restricted users a message addresses."""
+    """Why a message is a violation.
+
+    Two independent reasons, which can both hold at once: the message addresses
+    restricted users, and/or it uses a blacklisted word. A word hit has no target
+    - there is nobody being contacted - so it lives in its own field rather than
+    being faked as a ``Target`` with no id and no username.
+    """
 
     targets: tuple[Target, ...] = field(default_factory=tuple)
+    words: tuple[str, ...] = field(default_factory=tuple)
 
     def __bool__(self) -> bool:
-        return bool(self.targets)
+        return bool(self.targets or self.words)
 
     @property
     def user_ids(self) -> frozenset[int]:
         """Known numeric ids among the targets."""
         return frozenset(t.user_id for t in self.targets if t.user_id is not None)
 
+    @property
+    def by_word(self) -> bool:
+        """Whether a blacklisted word triggered this on its own."""
+        return bool(self.words) and not self.targets
+
     def summary(self) -> str:
-        """Compact, log-friendly rendering of every target."""
-        return ", ".join(target.describe() for target in self.targets)
+        """Compact, log-friendly rendering of every reason."""
+        parts: list[str] = []
+        if self.targets:
+            parts.append(", ".join(target.describe() for target in self.targets))
+        if self.words:
+            parts.append("blacklisted word " + ", ".join(repr(word) for word in self.words))
+        return " + ".join(parts)
+
+    def reason(self) -> str:
+        """One phrase suitable for a sentence aimed at the offender."""
+        if self.by_word:
+            return f"using a blacklisted word ({', '.join(self.words)})"
+        if self.words:
+            return (
+                f"addressing a restricted user ({self.summary()}) and using a "
+                f"blacklisted word ({', '.join(self.words)})"
+            )
+        return "addressing a restricted user"
 
 
 NO_DETECTION = Detection()

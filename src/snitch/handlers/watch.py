@@ -19,6 +19,7 @@ from snitch.config import Settings
 from snitch.detection import Detection, detect, is_whitelisted
 from snitch.directory import DirectoryHolder
 from snitch.services.moderator import Moderator, ViolationResult
+from snitch.wordlist import WordHit, WordList
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +75,14 @@ class Watcher:
         directory: DirectoryHolder,
         moderator: Moderator,
         samples: RecentSamples,
+        wordlist: WordList | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
         self._directory = directory
         self._moderator = moderator
         self._samples = samples
+        self._wordlist = wordlist
         # Admins change rarely, but not never: cache with a short TTL so a
         # promotion or demotion is picked up without an API call per message.
         self._admin_cache: dict[int, tuple[bool, float]] = {}
@@ -89,6 +92,9 @@ class Watcher:
         if not self._is_watched(message):
             return None
 
+        # The topic whitelist covers both rules. It is the one place the operator
+        # declared "nothing happens here", and quietly extending enforcement to
+        # it because a second rule was added later would be worse than useless.
         if is_whitelisted(message, self._settings):
             logger.debug(
                 "message %s ignored: whitelisted topic %s",
@@ -98,6 +104,12 @@ class Watcher:
             return None
 
         detection = detect(message, self._settings, self._directory.current)
+        words = self._word_hits(message)
+        if words:
+            detection = Detection(
+                targets=detection.targets,
+                words=tuple(hit.entry for hit in words),
+            )
         self._samples.add(message, bool(detection), detection)
         if not detection:
             return None
@@ -111,12 +123,24 @@ class Watcher:
             return None
 
         logger.info(
-            "violation detected: message %s in thread %s addresses %s",
+            "violation detected: message %s in thread %s: %s",
             message.message_id,
             message.message_thread_id,
             detection.summary(),
         )
         return await self._moderator.handle(message, detection)
+
+    # ------------------------------------------------------------------
+    def _word_hits(self, message: Message) -> list[WordHit]:
+        """Blacklisted words in this message, after picking up file changes.
+
+        ``_is_watched`` has already established that the sender is restricted, so
+        the word rule only ever applies to the people the operator listed.
+        """
+        if self._wordlist is None:
+            return []
+        self._wordlist.refresh()
+        return self._wordlist.match(message.text or message.caption)
 
     # ------------------------------------------------------------------
     def _is_watched(self, message: Message) -> bool:

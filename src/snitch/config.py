@@ -231,6 +231,13 @@ class Settings(BaseSettings):
     #: value means faster recovery rather than fewer retries.
     request_timeout: float = Field(default=30.0, ge=5.0, le=300.0)
 
+    #: Word blacklist file. One word or `re:<pattern>` per line; `#` comments.
+    #: Left empty, it defaults to DATA_DIR/wordlist.txt. There is no on/off
+    #: switch on purpose: the rule is active exactly when the file exists, so
+    #: there is nothing to configure and nothing to get out of step. Point this
+    #: elsewhere (or bind-mount it) to keep the list outside the data volume.
+    blacklist_file: Path | None = None
+
     #: Confirms you have checked @BotFather -> /setprivacy for this bot and it
     #: reads Disable. Privacy mode is not queryable through the Bot API, so
     #: snitch cannot tell whether it is deaf for this reason; left false, it
@@ -434,6 +441,11 @@ class Settings(BaseSettings):
         return GENERAL_TOPIC in self.whitelist_topic_ids
 
     @property
+    def wordlist_path(self) -> Path:
+        """Where the word blacklist is read from."""
+        return self.blacklist_file or (self.data_dir / "wordlist.txt")
+
+    @property
     def detection_enabled(self) -> bool:
         """Whether any detection signal is switched on."""
         return self.detect_replies or self.detect_mentions or self.detect_bare_usernames
@@ -463,5 +475,6 @@ class Settings(BaseSettings):
             "request_timeout": self.request_timeout,
             "process_backlog": self.process_backlog,
             "privacy_mode_verified": self.privacy_mode_verified,
+            "blacklist_file": str(self.wordlist_path),
             "data_dir": str(self.data_dir),
         }

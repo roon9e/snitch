@@ -90,7 +90,9 @@ def build_notice_text(
 ) -> str:
     """Assemble the human readable notice body."""
     head = f"{actor} " if include_actor else ""
-    text = f"{head}had a message removed for addressing a restricted user ({detection.summary()})."
+    # Phrased from the detection rather than hardcoded to "addressing a
+    # restricted user", which would be a lie for a pure word-list hit.
+    text = f"{head}had a message removed for {detection.reason()}."
     if muted_for_hours:
         text += f" Muted for {muted_for_hours}h."
     return text

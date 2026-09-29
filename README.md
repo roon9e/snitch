@@ -76,6 +76,8 @@ Right-click the bot -> `Manage Chat` -> `Administrators` -> `Add Administrator`:
 
 - **Delete messages** - required for the primary punishment.
 - **Ban users** - required only if you enable `MUTE_ENABLED`, and for `/unmute`.
+- **Send messages** - must be on, and the bot must be under no restriction, or
+  every command is ignored. See [9](#9-the-bot-works-but-commands-do-nothing).
 
 The group must be a **supergroup**. If you use `WHITELIST_TOPIC_IDS`, enable
 `Topics` in the group settings too.
@@ -206,6 +208,24 @@ sudo chown -R 10001:10001 ./data
 snitch checks this at startup rather than discovering it on the first violation,
 and the warning names both uids and the exact `chown` to run.
 
+### 9. The bot works but commands do nothing
+
+This is the failure that looks like a dead bot while it is quietly working, so
+it is worth naming on its own. If the bot has **Delete messages** but not **Send
+messages**, snitch catches every violation exactly as configured — which is
+convincing evidence that all is well — and silently ignores `/id`, `/status`,
+`/check`, `/unmute` and `/help`. With `MUTE_ENABLED=true` you then have no way
+to end a mute except changing the restriction by hand in the client.
+
+snitch now refuses to start in that state and says why, because the Bot API does
+let it be checked — but not where you would look first: the ability to send is
+**not** on the admin member record, since an admin can always post unless
+separately restricted. It is in the chat's own permission set, which `getChat`
+returns.
+
+Check: group -> Administrators -> your bot -> **Send messages** is on, and the
+bot is not under any restriction.
+
 ---
 
 ## Configuration
@@ -220,6 +240,7 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 | `RESTRICTED_USERS` | *required* | Comma separated user ids and/or `@usernames` |
 | `WHITELIST_TOPIC_IDS` | empty | Topic ids where the rule is off; `general` for the General topic |
 | `DELETE_MESSAGE` | `true` | Delete the offending message |
+| `BLACKLIST_FILE` | `""` | Word list; empty means `DATA_DIR/wordlist.txt`. Active when the file exists |
 | `MUTE_ENABLED` | `false` | Also mute the sender |
 | `MUTE_HOURS` | `24` | Mute length, `1..8784` |
 | `DETECT_REPLIES` | `true` | Catch replies |
@@ -237,6 +258,68 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 Invalid configuration is rejected at startup, with the offending variable named.
 `MUTE_HOURS` above 8784 is refused because Telegram silently turns any
 restriction longer than 366 days into a **permanent** ban.
+
+---
+
+## The word blacklist
+
+Separately from the no-contact rule, a list of banned words. A restricted user
+who uses one gets the same punishment: the message is deleted, and muted if
+`MUTE_ENABLED=true`.
+
+It lives in a **file**, not in `.env`, because this is the thing you actually
+edit while watching a group:
+
+```bash
+# DATA_DIR/wordlist.txt by default, or wherever BLACKLIST_FILE points
+vi wordlist.txt
+
+forbidden
+re:b[au]zz\w+
+buy now
+# comments and blank lines are ignored
+```
+
+| Line | Means |
+|---|---|
+| `forbidden` | Whole word, case-insensitive, on word boundaries |
+| `buy now` | Whole phrase, so the words must be adjacent |
+| `re:<pattern>` | A regular expression, case-insensitive |
+| `# ...` or blank | Ignored |
+
+**Whole words only, deliberately.** Substring matching turns `ass` into a
+minefield — `class`, `assess`, `bass`, `pass` all contain it — and a filter that
+cries wolf gets switched off inside a day. Use `re:` when you need something
+looser on purpose.
+
+**Only the users in `RESTRICTED_USERS` are held to it.** A stranger writing a
+banned word is not touched. The topic whitelist applies here too: it is the one
+place you said nothing happens, and adding a second rule later does not quietly
+extend enforcement into it.
+
+**It reloads.** Edit the file and the change is live within a few seconds. No
+restart. Run `/blacklist` to see the path, the number of active entries, and any
+lines that were rejected:
+
+```
+Word blacklist
+file = /app/data/wordlist.txt
+exists = yes
+active entries = 3
+```
+
+There is no on/off switch. The rule is active exactly when the file exists, so
+there is nothing to configure and nothing to get out of step.
+
+### Lookalikes
+
+A Latin blacklist is trivially bypassed by one keypress — type CYRILLIC SMALL
+LETTER O instead of `o`, or a fullwidth `ａ` instead of `a`, and it renders
+identically. Both the list and the message text are normalised (NFKC, casefolded,
+Cyrillic lookalikes mapped) before comparing, so those spellings are caught.
+
+This applies to the pattern too, so a word written in Cyrillic in your list
+still works. It is a mitigation, not a guarantee — Unicode is a large space.
 
 ---
 

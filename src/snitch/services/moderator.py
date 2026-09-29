@@ -246,12 +246,15 @@ class Moderator:
                 "username": sender.username,
                 "message_id": message.message_id,
                 "targets": detection.summary(),
+                "words": list(detection.words),
+                "rule": "word" if detection.by_word else "contact",
                 "deleted": result.deleted,
                 "mute_outcome": result.mute.value,
             },
         )
         self._audit.record(
             event="violation",
+            rule="word" if detection.by_word else "contact",
             chat_id=message.chat.id,
             thread_id=message.message_thread_id,
             user_id=sender.id,
@@ -260,6 +263,7 @@ class Moderator:
             message_id=message.message_id,
             message_excerpt=_excerpt(message),
             targets=[target.describe() for target in detection.targets],
+            words=list(detection.words),
             deleted=result.deleted,
             delete_error=result.delete_error,
             mute=result.mute.value,

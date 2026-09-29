@@ -222,8 +222,13 @@ def _check_chat_type(chat: Chat, settings: Settings) -> None:
     logger.warning("%s", detail)
 
 
-async def check_rights(bot: Bot, settings: Settings, bot_id: int) -> None:
-    """Verify the admin capabilities the configured punishment relies on."""
+async def check_rights(bot: Bot, settings: Settings, bot_id: int, chat: Chat | None = None) -> None:
+    """Verify the admin capabilities the configured punishment relies on.
+
+    ``chat`` is the object ``check_chat`` already fetched. Passing it avoids a
+    second ``getChat`` round trip at startup and keeps the permission check and
+    the reachability check reading the same view of the chat.
+    """
     try:
         member = await bot.get_chat_member(chat_id=settings.chat_id, user_id=bot_id)
     except TelegramAPIError as exc:
@@ -231,6 +236,23 @@ async def check_rights(bot: Bot, settings: Settings, bot_id: int) -> None:
             f"cannot read the bot's own member record in {settings.chat_id!r}: {_describe(exc)}",
             permanent=not is_transient(exc),
         ) from exc
+
+    # The ability to send is NOT on ChatMemberAdministrator - the Bot API has no
+    # such flag, because an admin can always post unless separately restricted.
+    # It lives in the chat's own permission set, which getChat returns.
+    view = chat if chat is not None else await _safe_get_chat(bot, settings)
+    permissions = getattr(view, "permissions", None)
+    if permissions is not None and not permissions.can_send_messages:
+        raise PreflightError(
+            "the bot cannot send messages in this chat, so it cannot answer commands.\n"
+            "This is the failure that looks like 'the bot is dead' while it is quietly\n"
+            "working: deletion still succeeds, so snitch keeps catching violations, and\n"
+            "every command is silently ignored - /id, /status, /check, /help.\n"
+            "With MUTE_ENABLED=true there is then no /unmute, so the only way to end a\n"
+            "mute is to change the restriction by hand in the client.\n"
+            "Fix: the bot must not be restricted. Manage chat -> Administrators -> the\n"
+            "bot -> 'Send messages' on, and check it is not under any restriction."
+        )
 
     if isinstance(member, ChatMemberOwner):
         logger.info("the bot is the chat owner - all rights available")
@@ -266,6 +288,21 @@ async def check_rights(bot: Bot, settings: Settings, bot_id: int) -> None:
         member.can_delete_messages,
         member.can_restrict_members,
     )
+
+
+async def _safe_get_chat(bot: Bot, settings: Settings) -> object | None:
+    """``getChat`` that cannot fail the startup it is only helping with.
+
+    Used when check_rights is called without a chat. check_chat has already
+    proved the chat is reachable by this point, so a failure here means "cannot
+    tell", not "cannot send" - and refusing to start on that would be worse than
+    the thing being checked.
+    """
+    try:
+        return await bot.get_chat(settings.chat_id)
+    except TelegramAPIError as exc:
+        logger.warning("could not read chat permissions to verify sending: %s", _describe(exc))
+        return None
 
 
 def check_config(settings: Settings, directory: Directory) -> None:
