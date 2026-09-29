@@ -48,6 +48,19 @@ def closed_port() -> int:
 # ===========================================================================
 # the happy path, against a real SOCKS5 server
 # ===========================================================================
+async def closed(server: asyncio.AbstractServer) -> None:
+    """Shut a test server down without ever blocking.
+
+    From Python 3.12, ``Server.wait_closed()`` waits for every open connection
+    to finish, so a handler that never closed its writer - which a deliberately
+    stalled peer does not - would block teardown forever. Bounded here so a
+    misbehaving fake can fail a test rather than wedge the run.
+    """
+    server.close()
+    with contextlib.suppress(asyncio.TimeoutError, OSError):
+        await asyncio.wait_for(server.wait_closed(), 2)
+
+
 async def socks5_server(reply: bytes = b"\x05\x00", accepted: list[str] | None = None):
     """Minimal SOCKS5 server: reads a greeting, answers, closes."""
 
@@ -61,8 +74,9 @@ async def socks5_server(reply: bytes = b"\x05\x00", accepted: list[str] | None =
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
             pass
         finally:
+            writer.close()
             with contextlib.suppress(OSError):
-                writer.close()
+                await writer.wait_closed()
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0)
     return server, int(server.sockets[0].getsockname()[1])
@@ -74,8 +88,7 @@ async def test_reachable_socks_proxy_is_ok():
     try:
         result = await probe(socks_settings(port))
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert result.ok is True
@@ -88,8 +101,7 @@ async def test_ok_report_names_the_proxy():
     try:
         result = await probe(socks_settings(port))
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert f"127.0.0.1:{port}" in result.report()
@@ -102,8 +114,7 @@ async def test_socks4_style_reply_is_accepted():
     try:
         result = await probe(socks_settings(port))
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert result.ok is True
@@ -115,8 +126,7 @@ async def test_preflight_passes_when_the_proxy_answers(caplog):
         with caplog.at_level("INFO"):
             await preflight.check_proxy(socks_settings(port))
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert any("proxy reachable" in record.message for record in caplog.records)
 
@@ -148,8 +158,7 @@ async def test_an_http_server_on_the_port_is_not_called_socks():
     try:
         result = await probe(socks_settings(port), timeout=2.0)
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert result.verdict is Verdict.NOT_SOCKS
@@ -159,16 +168,19 @@ async def test_a_silent_port_is_not_called_socks():
     """A listener that accepts and never speaks is not a working SOCKS server."""
 
     async def accept_and_stall(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        del reader, writer
-        await asyncio.sleep(10)
+        del reader
+        try:
+            # Long enough that the probe's 0.5s handshake read times out first.
+            await asyncio.sleep(5)
+        finally:
+            writer.close()
 
     server = await asyncio.start_server(accept_and_stall, "127.0.0.1", 0)
     port = int(server.sockets[0].getsockname()[1])
     try:
         result = await probe(socks_settings(port), timeout=0.5)
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert result.verdict is Verdict.NOT_SOCKS
@@ -214,8 +226,7 @@ async def test_an_ip_literal_needs_no_resolver(monkeypatch: pytest.MonkeyPatch):
     try:
         result = await probe(socks_settings(port, host="127.0.0.1"))
     finally:
-        server.close()
-        await server.wait_closed()
+        await closed(server)
 
     assert result is not None
     assert result.ok is True

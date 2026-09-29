@@ -171,9 +171,13 @@ async def probe(settings: Settings, timeout: float = DEFAULT_PROBE_TIMEOUT) -> P
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
         pass
     finally:
+        # Every teardown step is bounded. StreamWriter.wait_closed() waits for
+        # the transport to finish closing, which against a stalled peer does not
+        # return on its own - unbounded, it would hang startup here and block
+        # event loop shutdown later.
         writer.close()
-        with contextlib.suppress(OSError):
-            await writer.wait_closed()
+        with contextlib.suppress(OSError, asyncio.TimeoutError):
+            await asyncio.wait_for(writer.wait_closed(), timeout)
 
     if reply and reply[0] not in (0x04, 0x05):
         return result(

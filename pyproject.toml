@@ -51,7 +51,7 @@ addopts = "-q --strict-markers"
 # so it still works under pytest-asyncio's event loop. This exists because a
 # test performing a real DNS lookup wedged a CI run: loop.getaddrinfo runs in the
 # default ThreadPoolExecutor, cannot be cancelled, and is joined at teardown.
-timeout = 120
+timeout = 60
 timeout_method = "thread"
 filterwarnings = ["error::DeprecationWarning:snitch.*"]
 
