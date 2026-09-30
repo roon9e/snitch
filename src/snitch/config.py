@@ -223,6 +223,15 @@ class Settings(BaseSettings):
     directory_refresh_hours: float = Field(default=6.0, ge=0.1, le=720.0)
     mute_cooldown_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
 
+    #: Rotate the audit log once the live file passes this size, in bytes.
+    #: An audit log nobody prunes is just a slow way to fill a disk, and this
+    #: one is written from inside a volume on the host. 0 disables rotation.
+    audit_max_bytes: int = Field(default=5 * 1024 * 1024, ge=0, le=1024 * 1024 * 1024)
+
+    #: How many rotated generations to keep. Total audit usage is bounded by
+    #: audit_max_bytes * (audit_max_files + 1), so 5 MB x 5 is about 30 MB.
+    audit_max_files: int = Field(default=5, ge=1, le=100)
+
     # --- network tuning ---------------------------------------------------
     #: Per-request timeout, in seconds, for calls to the Telegram API. Lower it
     #: when a proxy stalls: aiohttp's default is 30s, and the SOCKS connect
@@ -485,6 +494,8 @@ class Settings(BaseSettings):
             "log_level": self.log_level,
             "log_format": self.log_format.value,
             "request_timeout": self.request_timeout,
+            "audit_max_bytes": self.audit_max_bytes,
+            "audit_max_files": self.audit_max_files,
             "delete_batch_size": self.delete_batch_size,
             "delete_flush_seconds": self.delete_flush_seconds,
             "process_backlog": self.process_backlog,

@@ -228,6 +228,42 @@ bot is not under any restriction.
 
 ---
 
+## Disk usage
+
+Two things grow on disk, and both are bounded:
+
+| What | Bound | How |
+|---|---|---|
+| Container stdout (`docker compose logs`) | ~30 MB | `max-size: 10m` × `max-file: "3"` in `docker-compose.yml` |
+| `violations.jsonl` audit log | `AUDIT_MAX_BYTES × (AUDIT_MAX_FILES + 1)`, ~30 MB | size-based rotation |
+
+The audit log is the one that actually needed work: it is append-only and was
+never pruned, in a volume on your host. Now, when a write would push it past
+`AUDIT_MAX_BYTES`, it rotates:
+
+```
+violations.jsonl      <- live, newest records
+violations.jsonl.1    <- previous generation
+...
+violations.jsonl.5    <- oldest kept; .6 is deleted
+```
+
+**The check happens before the write, not after.** Rotating after would sweep the
+record that triggered the rotation into the archive along with everything older,
+leaving the live file empty and `/status` showing nothing until the next
+violation happened to arrive. Checking first keeps the newest records readable,
+which is the only reason to read them.
+
+A rotation that *fails* is warned about loudly and the record is still written —
+losing enforcement history is worse than losing rotation — but the warning says
+the file will keep growing, because at that point the bound is gone. Set
+`AUDIT_MAX_BYTES=0` to disable rotation entirely.
+
+Nothing else accumulates: the `/check` buffer is in-memory and bounded, and the
+word list is a file you control.
+
+---
+
 ## Configuration
 
 See [`.env.example`](.env.example) for the annotated full list. The essentials:
@@ -256,6 +292,8 @@ See [`.env.example`](.env.example) for the annotated full list. The essentials:
 | `REQUEST_TIMEOUT` | `30` | Per-request API timeout, `5..300`; lower it for a flaky proxy |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `text` | Set `LOG_FORMAT=json` for log shipping |
 | `DATA_DIR` | `/app/data` | Where `violations.jsonl` is written |
+| `AUDIT_MAX_BYTES` | `5242880` | Rotate the audit log past this size; `0` disables |
+| `AUDIT_MAX_FILES` | `5` | Rotated audit generations to keep |
 
 Invalid configuration is rejected at startup, with the offending variable named.
 `MUTE_HOURS` above 8784 is refused because Telegram silently turns any

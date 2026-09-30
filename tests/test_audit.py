@@ -288,6 +288,175 @@ def test_the_problem_is_reported_once_not_on_every_violation(tmp_path, monkeypat
 
 
 # ===========================================================================
+# rotation: the audit log must not be a slow way to fill a disk
+# ===========================================================================
+
+
+def small(data_dir: Path, *, max_bytes: int = 400, keep: int = 3) -> AuditLog:
+    """An audit log with a tiny rotation threshold, so the tests stay readable."""
+    return AuditLog(data_dir, max_bytes=max_bytes, keep=keep)
+
+
+def fill(log: Any, count: int, start: int = 0) -> None:
+    for index in range(start, start + count):
+        log.record(event="violation", user_id=111, n=index, filler="x" * 40)
+
+
+def generations(data_dir: Path) -> list[str]:
+    return sorted(p.name for p in data_dir.iterdir())
+
+
+def test_no_rotation_while_under_the_limit(tmp_path):
+    log = small(tmp_path, max_bytes=4000)
+
+    fill(log, 3)
+
+    assert generations(tmp_path) == [FILENAME], "one file only"
+
+
+def test_the_live_file_is_rotated_when_it_would_overflow(tmp_path):
+    log = small(tmp_path)
+    fill(log, 20)
+
+    assert (tmp_path / FILENAME).exists()
+    assert (tmp_path / f"{FILENAME}.1").exists()
+
+
+def test_rotation_is_bounded_to_the_configured_generations(tmp_path):
+    """The whole point: total size is bounded, so the disk cannot be exhausted."""
+    log = small(tmp_path, keep=3)
+    fill(log, 200)
+
+    files = generations(tmp_path)
+    assert len(files) == 4, f"live file plus 3 generations, got {files}"
+    assert ".4" not in " ".join(files), "the oldest generation is dropped, not kept"
+
+
+def test_total_disk_usage_stays_bounded(tmp_path):
+    log = small(tmp_path, max_bytes=400, keep=3)
+    fill(log, 500)
+
+    total = sum(p.stat().st_size for p in tmp_path.iterdir())
+
+    # live + 3 generations, each at most max_bytes (plus the record that tipped
+    # it over, and a little slack for the test's own record sizes).
+    assert total < 400 * 4 * 2, f"usage {total} is not bounded"
+
+
+def test_the_newest_records_stay_readable_after_rotation(tmp_path):
+    """/status reads the live file. Rotating after writing would sweep the
+    triggering record into the archive and leave /status showing nothing."""
+    log = small(tmp_path)
+    fill(log, 200)
+
+    tail = json.loads(log.tail()[-1])
+
+    assert tail["n"] == 199, "the newest record must still be in the live file"
+
+
+def test_records_never_straddle_a_rotation(tmp_path):
+    """A rotation in the middle of a line would corrupt that record forever."""
+    log = small(tmp_path, max_bytes=300)
+    fill(log, 100)
+
+    for generation in [tmp_path / FILENAME, *[tmp_path / f"{FILENAME}.{i}" for i in (1, 2, 3)]]:
+        if not generation.exists():
+            continue
+        for line in generation.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                json.loads(line)
+
+
+def test_an_older_generation_is_shifted_not_overwritten(tmp_path):
+    log = small(tmp_path, keep=3)
+    fill(log, 20)
+    second = (tmp_path / f"{FILENAME}.2").read_text(encoding="utf-8")
+    before = len(second.splitlines())
+
+    fill(log, 200, start=1000)
+
+    now = (tmp_path / f"{FILENAME}.2").read_text(encoding="utf-8")
+    assert len(now.splitlines()) == before, "the generation moved along, it did not lose data"
+
+
+def test_rotation_can_be_switched_off(tmp_path):
+    """0 is the documented way to say 'never rotate', for a volume with room."""
+    log = small(tmp_path, max_bytes=0)
+    fill(log, 200)
+
+    assert generations(tmp_path) == [FILENAME]
+
+
+def test_the_limit_is_checked_before_the_write_not_after(tmp_path):
+    """The file must be allowed to exceed the threshold by at most one record,
+    never by a whole generation's worth."""
+    log = small(tmp_path, max_bytes=400, keep=1)
+    fill(log, 100)
+
+    live = (tmp_path / FILENAME).stat().st_size
+    assert live <= 400 + 200, f"live file grew to {live}, well past the limit"
+
+
+def test_rotation_failure_does_not_lose_the_record(tmp_path, monkeypatch, caplog):
+    """Losing enforcement history is worse than losing rotation."""
+    log = small(tmp_path, max_bytes=1)
+    fill(log, 5)
+
+    def boom(_self: Path, *_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with caplog.at_level(logging.WARNING):
+        log.record(event="violation", user_id=999, n="survivor")
+
+    assert any("will keep growing" in r.message for r in caplog.records)
+
+
+def test_a_rotation_failure_is_machine_readable(tmp_path, monkeypatch, caplog):
+    log = small(tmp_path, max_bytes=1)
+    fill(log, 5)
+
+    def boom(_self: Path, *_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with caplog.at_level(logging.WARNING):
+        log.record(event="violation", user_id=999)
+
+    record = next(r for r in caplog.records if "rotate" in r.message)
+    assert getattr(record, "event", None) == "audit_rotation_failed"
+
+
+def test_keep_must_be_at_least_one(tmp_path):
+    """Zero generations would mean deleting the log on every write."""
+    with pytest.raises(ValueError, match="keep"):
+        AuditLog(tmp_path, keep=0)
+
+
+def test_a_successful_rotation_is_logged(tmp_path, caplog):
+    """Silently discarding audit history is not acceptable either."""
+    log = small(tmp_path, max_bytes=200)
+
+    with caplog.at_level(logging.INFO):
+        fill(log, 40)
+
+    assert any("rotated the audit log" in r.message for r in caplog.records)
+
+
+def test_rotation_survives_a_restart(tmp_path):
+    """The generations must be honoured by the next process, not reset."""
+    first = small(tmp_path, keep=2)
+    fill(first, 60)
+    assert (tmp_path / f"{FILENAME}.1").exists()
+
+    second = small(tmp_path, keep=2)
+    fill(second, 60, start=5000)
+
+    files = generations(tmp_path)
+    assert len(files) == 3, f"live plus 2 generations, got {files}"
+
+
+# ===========================================================================
 # the other failure: the directory itself
 # ===========================================================================
 

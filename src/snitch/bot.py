@@ -37,6 +37,18 @@ logger = logging.getLogger(__name__)
 ALLOWED_UPDATES = ["message"]
 
 
+def _human_bytes(count: int) -> str:
+    """A byte count an operator can read at a glance."""
+    if count <= 0:
+        return "no limit"
+    value = float(count)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"  # pragma: no cover - unreachable
+
+
 @dataclass(slots=True)
 class App:
     """The wired-up application plus the task that keeps the directory fresh."""
@@ -210,9 +222,19 @@ async def build_app(settings: Settings, started_at: datetime | None = None) -> A
             me.username,
         )
 
-    audit = AuditLog(settings.data_dir)
+    audit = AuditLog(
+        settings.data_dir,
+        max_bytes=settings.audit_max_bytes,
+        keep=settings.audit_max_files,
+    )
     if audit.enabled:
-        logger.info("audit log -> %s", audit.path)
+        logger.info(
+            "audit log -> %s (rotated past %s, keeping %d generation(s): at most %s on disk)",
+            audit.path,
+            _human_bytes(settings.audit_max_bytes),
+            settings.audit_max_files,
+            _human_bytes(settings.audit_max_bytes * (settings.audit_max_files + 1)),
+        )
     else:
         logger.warning("audit log is disabled; violations will only reach the container log")
 

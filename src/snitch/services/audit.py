@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 FILENAME = "violations.jsonl"
 
+#: Rotate the live file past this size, in bytes. ~5 MB is roughly 10-15k
+#: violation records, which is a lot of history for a moderation log.
+DEFAULT_MAX_BYTES = 5 * 1024 * 1024
+
+#: How many previous generations to keep alongside it. Total usage is therefore
+#: bounded by ``max_bytes * (keep + 1)`` - about 30 MB at the defaults.
+DEFAULT_KEEP = 5
+
 
 def _current_uid() -> int | None:
     """The uid this process runs as, or None where the concept does not exist."""
@@ -90,8 +98,18 @@ def _hint(path: Path, exc: OSError) -> dict[str, object]:
 class AuditLog:
     """Writes violation records to ``DATA_DIR/violations.jsonl``."""
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        keep: int = DEFAULT_KEEP,
+    ) -> None:
+        if keep < 1:
+            raise ValueError(f"keep must be at least 1, got {keep}")
         self._path = data_dir / FILENAME
+        self._max_bytes = max_bytes
+        self._keep = keep
         self._enabled = self._prepare(data_dir)
 
     @property
@@ -158,6 +176,7 @@ class AuditLog:
         payload = {"ts": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"), **fields}
         line = json.dumps(payload, default=str, ensure_ascii=False)
         try:
+            self._rotate_if_needed(len(line.encode("utf-8")) + 1)
             with self._path.open("a", encoding="utf-8") as handle:
                 handle.write(f"{line}\n")
         except OSError as exc:
@@ -171,6 +190,73 @@ class AuditLog:
                 extra=_hint(self._path, exc),
             )
 
+    # ------------------------------------------------------------------
+    # rotation
+    # ------------------------------------------------------------------
+    def _rotate_if_needed(self, incoming: int) -> None:
+        """Rotate when the next record would push the file past its limit.
+
+        Checked *before* writing, not after. Rotating after would sweep the
+        record that triggered it into the archive along with everything older,
+        leaving ``tail()`` - and therefore ``/status`` - showing nothing at all
+        until the next violation happened to arrive. Pre-checking keeps the
+        newest records in the live file, which is the whole point of reading it.
+        """
+        if self._max_bytes <= 0:
+            return
+        try:
+            size = self._path.stat().st_size
+        except OSError:
+            return  # No file yet: nothing to rotate, and the write will make one.
+        if size + incoming <= self._max_bytes:
+            return
+        self._rotate()
+
+    def _rotate(self) -> None:
+        """Shift the generations along and start a fresh live file.
+
+        ``violations.jsonl`` -> ``.1`` -> ``.2`` ... and the oldest is dropped,
+        so total usage is bounded by ``max_bytes * keep`` rather than growing
+        forever. The bound is the point: an audit log that nobody prunes is just
+        a slow way to fill a disk.
+
+        A failure here is warned about, not raised. The caller still writes the
+        record, because losing enforcement history is worse than losing
+        rotation - but a rotation that keeps failing means the file can still
+        grow, which is worth saying out loud.
+        """
+        name = self._path.name
+        oldest = self._path.with_name(f"{name}.{self._keep}")
+        try:
+            oldest.unlink(missing_ok=True)
+            for index in range(self._keep - 1, 0, -1):
+                source = self._path.with_name(f"{name}.{index}")
+                if source.exists():
+                    source.replace(self._path.with_name(f"{name}.{index + 1}"))
+            self._path.replace(self._path.with_name(f"{name}.1"))
+        except OSError as exc:
+            logger.warning(
+                "could not rotate the audit log %s (%s); it will keep growing until "
+                "this is fixed, and the total is no longer bounded",
+                self._path,
+                exc,
+                extra={
+                    "event": "audit_rotation_failed",
+                    "path": str(self._path),
+                    "errno": getattr(exc, "errno", None),
+                },
+            )
+            return
+        logger.info(
+            "rotated the audit log: %s is now empty, keeping %d previous generation(s) of "
+            "at most %d bytes each",
+            self._path,
+            self._keep,
+            self._max_bytes,
+            extra={"event": "audit_rotated", "path": str(self._path), "kept": self._keep},
+        )
+
+    # ------------------------------------------------------------------
     def tail(self, limit: int = 20) -> list[str]:
         """Last ``limit`` raw lines, newest last. Used by the /status command."""
         if not self._enabled or not self._path.exists():
